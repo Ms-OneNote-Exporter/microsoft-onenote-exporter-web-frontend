@@ -110,32 +110,34 @@ describe("readCsrfToken", () => {
 });
 
 describe("the status snapshot carries the token, so a reload recovers it", () => {
-  it("reads it from the snapshot", () => {
-    const status = parseSessionStatus({
-      authenticated: true,
-      signedIn: true,
-      csrfToken: TOKEN,
-      notebooks: { state: "loaded", items: [] },
-    });
-    expect(status.csrfToken).toBe(TOKEN);
-    expect(status.matched.csrfToken).toBe("csrfToken");
-  });
+  const SNAPSHOT = {
+    session: { state: "created" },
+    auth: { state: "none" },
+    notebooks: { state: "idle", items: [] },
+    export: { state: "none", partialReason: null, id: null, notebook: null, progress: null },
+    artifact: { available: false, partial: false, downloadUrl: null, fileName: null },
+  };
 
-  it("accepts the snake_case spelling too", () => {
-    const status = parseSessionStatus({ authenticated: true, csrf_token: TOKEN });
-    expect(status.csrfToken).toBe(TOKEN);
-    expect(status.matched.csrfToken).toBe("csrf_token");
+  it("reads it from the snapshot", () => {
+    const parsed = parseSessionStatus({ ...SNAPSHOT, csrfToken: TOKEN });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.csrfToken).toBe(TOKEN);
   });
 
   it("reports null when the backend sends none", () => {
+    const parsed = parseSessionStatus(SNAPSHOT);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
     // Surfaced to the user as a version mismatch rather than papered over with
     // an empty header and a `forbidden` from every route.
-    const status = parseSessionStatus({ authenticated: true });
-    expect(status.csrfToken).toBeNull();
-    expect(status.matched.csrfToken).toBeUndefined();
+    expect(parsed.value.csrfToken).toBeNull();
   });
 
   it("reports null for an empty string, which is worse than absent", () => {
-    expect(parseSessionStatus({ csrfToken: "" }).csrfToken).toBeNull();
+    const parsed = parseSessionStatus({ ...SNAPSHOT, csrfToken: "" });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.csrfToken).toBeNull();
   });
 });

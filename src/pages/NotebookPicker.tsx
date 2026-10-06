@@ -12,17 +12,13 @@
  * credential has been accepted.
  */
 import { useState } from "react";
-import {
-  notebookStatus,
-  type NotebookList,
-  type RunningExport,
-} from "../lib/session";
+import type { NotebookList, RunningExport } from "../lib/session";
 
 export interface NotebookPickerProps {
   notebooks: NotebookList;
   /** False until the credential has been accepted. */
   signedIn: boolean;
-  export: RunningExport | undefined;
+  export: RunningExport | null;
   streamState: "connecting" | "open" | "replaying" | "closed";
   onList: () => void;
   onStart: (notebook: string) => void;
@@ -39,7 +35,10 @@ export function NotebookPicker({
   onAbort,
 }: NotebookPickerProps) {
   const [selected, setSelected] = useState<string | null>(null);
-  const view = notebookStatus(notebooks);
+  // A closed union transcribed from the api, so it is rendered directly rather
+  // than normalised. The previous version mapped an unrecognised value to
+  // `unknown`; that was a workaround for a guess, and the guess was wrong.
+  const view = notebooks;
 
   // A running export wins over the chooser: during one there is nothing to
   // pick, and offering a second start is what produces a 409.
@@ -56,8 +55,8 @@ export function NotebookPicker({
         container, so it takes a moment rather than appearing instantly.
       </p>
 
-      <button type="button" onClick={onList} disabled={view.kind === "listing"}>
-        {view.kind === "listing" ? "Listing…" : "List my notebooks"}
+      <button type="button" onClick={onList} disabled={view.state === "listing"}>
+        {view.state === "listing" ? "Listing…" : "List my notebooks"}
       </button>
 
       <NotebookBody
@@ -91,12 +90,12 @@ function NotebookBody({
   onSelect,
   signedIn,
 }: {
-  view: ReturnType<typeof notebookStatus>;
+  view: NotebookList;
   selected: string | null;
   onSelect: (name: string) => void;
   signedIn: boolean;
 }) {
-  if (view.kind === "listing") {
+  if (view.state === "listing") {
     return (
       <p className="fineprint" role="status">
         Listing notebooks…
@@ -104,31 +103,16 @@ function NotebookBody({
     );
   }
 
-  if (view.kind === "failed") {
+  if (view.state === "failed") {
     return (
       <p className="error" role="alert">
-        The notebook listing failed: {view.error}. You can try again.
+        The notebook listing failed. You can try again.
       </p>
     );
   }
 
-  if (view.kind === "unknown") {
-    // Deliberately not "no notebooks". An empty list after a successful
-    // listing is a real, reportable state; a state we do not recognise is a
-    // contract mismatch, and conflating the two hides it.
-    return (
-      <p className="error" role="alert">
-        The service reported an unrecognised notebook state (
-        <code>{view.rawState}</code>). This is a version problem, not an empty
-        account — please report it.
-      </p>
-    );
-  }
-
-  if (view.kind === "idle") {
-    return (
-      <p className="fineprint">No notebooks listed yet.</p>
-    );
+  if (view.state === "idle") {
+    return <p className="fineprint">No notebooks listed yet.</p>;
   }
 
   if (view.items.length === 0) {
@@ -173,43 +157,44 @@ function ExportProgress({
   onAbort: (exportId: string) => void;
 }) {
   const finished = running.state === "done";
-  const stopped = running.state === "failed" || running.state === "aborted";
+  // `partial` is its own outcome and `partialReason` says which. Rendering all
+  // three as "you stopped this" would be false for quota and disk, and would
+  // send the user hunting for something they did not do.
+  const stopped = running.state === "failed" || running.state === "partial";
 
   return (
     <section className="card">
       <h2>
-        {finished ? "Export complete" : stopped ? "Export stopped" : "Exporting"}
+        {finished
+          ? "Export complete"
+          : running.state === "partial"
+            ? "Export stopped early"
+            : running.state === "failed"
+              ? "Export failed"
+              : "Exporting"}
       </h2>
 
       <p>
         <strong>{running.notebook}</strong>
-        {running.exportId && (
+        {running.id && (
           <>
             {" "}
-            — reference <code>{running.exportId}</code>
+            — reference <code>{running.id}</code>
           </>
         )}
       </p>
 
-      <p aria-live="polite">
-        {running.state === "queued" && "Queued."}
-        {running.state === "running" && (running.progress ?? "Working…")}
-        {finished && "Everything has been written to the vault."}
-        {running.state === "aborted" && "You stopped this export."}
-        {running.state === "failed" &&
-          `It failed${running.error ? `: ${running.error}` : "."}`}
-      </p>
+      <p aria-live="polite">{describeExport(running)}</p>
 
       {!finished && !stopped && (
-        <button type="button" onClick={() => onAbort(running.exportId)}>
+        <button type="button" onClick={() => onAbort(running.id)}>
           Stop this export
         </button>
       )}
 
-      {/* The stream is not just a progress nicety: after a reconnect the server
-          replays from its ring buffer, so progress continues to be correct
-          without polling. Losing it silently would leave this card frozen on
-          whatever it last saw. */}
+      {/* The stream is not a progress nicety: after a reconnect the server
+          replays from its ring buffer, so progress stays correct without
+          polling. Losing it silently would leave this card frozen. */}
       {streamState !== "open" && !finished && (
         <p className="fineprint" role="status">
           {streamState === "replaying"
@@ -220,48 +205,68 @@ function ExportProgress({
         </p>
       )}
 
-      {finished && running.artifacts && running.artifacts.length > 0 && (
+      {running.downloadUrl && (
         <ul className="artifacts">
-          {running.artifacts.map((a) => (
-            <li key={a.artifactId}>
-              {/*
-                A server-supplied `url` wins over the constructed path. Whether
-                `GET /files/:artifactId` lives on the static host (Caddy plus
-                `forward_auth`) or on the API origin was undecided when this was
-                written, and the two produce different hrefs. When the server
-                tells us where the artifact is, this component is not responsible
-                for being right about it.
+          <li>
+            {/*
+              The URL comes from the snapshot's `artifact.downloadUrl`. This
+              component does not construct a path and does not know whether Caddy
+              or the api serves it — which is the point, and it retires a guess
+              that used to live in this file.
 
-                `download` is only honoured same-origin, so the fallback keeps
-                it and lets the server's `Content-Disposition` name the file
-                when the href turns out to be cross-origin. Nothing is lost by
-                setting it either way.
-              */}
-              <a
-                href={a.url ?? `/files/${encodeURIComponent(a.artifactId)}`}
-                download={a.name}
-              >
-                {a.name}
-              </a>
-              {typeof a.bytes === "number" && (
-                <span className="fineprint"> ({formatBytes(a.bytes)})</span>
-              )}
-            </li>
-          ))}
+              `download` is honoured same-origin only; cross-origin the browser
+              navigates and `Content-Disposition` names the file instead. Setting
+              it either way costs nothing.
+            */}
+            <a href={running.downloadUrl} download={running.fileName ?? undefined}>
+              {running.fileName ?? "Download the vault"}
+            </a>
+            {running.artifactPartial && (
+              <span className="fineprint">
+                {" "}
+                — this export is incomplete, so the vault is partial
+              </span>
+            )}
+          </li>
         </ul>
       )}
     </section>
   );
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
+/**
+ * One sentence per outcome, and the partial case branches on the reason.
+ *
+ * This is the whole reason `partialReason` exists as a separate field: the
+ * difference between "try again" and "free some space and try again" is what the
+ * user needs to hear, and neutral wording gives them neither.
+ */
+function describeExport(running: RunningExport): string {
+  switch (running.state) {
+    case "queued":
+      return "Queued.";
+    case "running":
+      return running.progress
+        ? `${running.progress.pages} pages, ${running.progress.sections} sections, ${running.progress.assets} assets so far.`
+        : "Working…";
+    case "done":
+      return "Everything has been written to the vault.";
+    case "failed":
+      return "The export failed. Nothing was completed, so you can start again.";
+    case "partial":
+      switch (running.partialReason) {
+        case "aborted":
+          return "You stopped this export, so the vault is incomplete.";
+        case "quota":
+          return "The export stopped because a service quota was reached. The vault is incomplete — try again once the quota resets.";
+        case "disk":
+          return "The export stopped because the container ran out of disk space. The vault is incomplete — free space and try again.";
+        default:
+          // No reason, or one this build does not know. Say what is true and
+          // nothing more: the vault is incomplete, and we cannot say why.
+          return "The export stopped before it finished, so the vault is incomplete.";
+      }
+    default:
+      return "";
   }
-  return `${value.toFixed(1)} ${units[unit]}`;
 }
