@@ -40,6 +40,25 @@ export class ProtocolMismatchError extends Error {
 type FetchOpts = Omit<RequestInit, "body"> & { body?: unknown };
 
 /**
+ * A `string` body is transmitted verbatim; anything else is JSON-encoded.
+ *
+ * This distinction is the whole reason the credential route works. The server
+ * declines to parse the credential, so JSON-encoding it would send
+ * `"hunter2"` — quotes included — and a password containing a quote or a
+ * backslash would reach the server as a *different* password than the one the
+ * user typed. The header follows the same rule for the same reason: declaring
+ * `text/plain` and sending a JSON body is a mismatch, not a hardening.
+ */
+function encodeBody(body: unknown): {
+  payload: string;
+  isRaw: boolean;
+} {
+  return typeof body === "string"
+    ? { payload: body, isRaw: true }
+    : { payload: JSON.stringify(body), isRaw: false };
+}
+
+/**
  * `credentials: "include"` is mandatory, not cosmetic. The session cookie is
  * `SameSite=None` because the two origins are cross-site, so it is only sent
  * when credentials are explicitly included. Forgetting it produces a UI that
@@ -47,10 +66,14 @@ type FetchOpts = Omit<RequestInit, "body"> & { body?: unknown };
  */
 async function request<T>(path: string, opts: FetchOpts = {}): Promise<T> {
   const { body, headers, ...rest } = opts;
-  const isJson = body !== undefined;
+  const encoded = body === undefined ? null : encodeBody(body);
 
   const merged: Record<string, string> = {
-    ...(isJson ? { "Content-Type": "application/json" } : {}),
+    // A raw string body declares its own content type at the call site, so
+    // only the JSON case is defaulted here.
+    ...(encoded && !encoded.isRaw
+      ? { "Content-Type": "application/json" }
+      : {}),
     // Readable CSRF cookie -> required header. The header is not
     // CORS-safelisted, so this forces a preflight, which means a
     // non-allowlisted origin cannot cause the body to be transmitted at all.
@@ -75,7 +98,7 @@ async function request<T>(path: string, opts: FetchOpts = {}): Promise<T> {
     // mean the browser holds a credential response it did not ask for.
     redirect: "error",
   };
-  if (body !== undefined) init.body = JSON.stringify(body);
+  if (encoded) init.body = encoded.payload;
 
   const res = await fetch(`${API_ORIGIN}${path}`, init);
 
@@ -146,7 +169,9 @@ export const api = {
     }),
 
   abort: (exportId: string) =>
-    request<void>(`/api/export/${exportId}/abort`, { method: "POST" }),
+    request<void>(`/api/export/${encodeURIComponent(exportId)}/abort`, {
+      method: "POST",
+    }),
 
   snapshot: () => request<unknown>("/api/session/snapshot"),
 
