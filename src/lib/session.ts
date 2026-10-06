@@ -53,6 +53,21 @@ export interface SessionStatus {
   notebooks: NotebookList;
   /** The running export, if any. Drives refresh-restore during an export. */
   export?: RunningExport | undefined;
+  /**
+   * The CSRF token every mutating request must present, or null.
+   *
+   * **The snapshot carries this because in-memory alone does not survive a
+   * reload.** The token was previously a readable cookie the page echoed into a
+   * header; that cannot work across origins, so it arrives in a body instead —
+   * which means a refresh has nothing to echo. `/api/session/status` is already
+   * fetched on every load, so putting it here costs no extra round trip and no
+   * new route.
+   *
+   * Null means the backend did not send one. That is a contract mismatch and is
+   * surfaced as such, rather than being papered over by sending an empty header
+   * and collecting a `forbidden` from every mutating route.
+   */
+  csrfToken: string | null;
   /** Which alias satisfied each field. Diagnostic; see the note above. */
   matched: MatchedAliases;
 }
@@ -62,6 +77,7 @@ export interface MatchedAliases {
   signedIn?: string | undefined;
   notebooks?: string | undefined;
   export?: string | undefined;
+  csrfToken?: string | undefined;
 }
 
 export type ExportState =
@@ -110,6 +126,7 @@ const ALIASES = {
   signedIn: ["signedIn", "signed_in", "isSignedIn", "credential_accepted"],
   notebooks: ["notebooks", "notebookList", "notebook_list"],
   export: ["export", "runningExport", "running_export", "currentExport", "job"],
+  csrfToken: ["csrfToken", "csrf_token"],
 } as const satisfies Record<keyof MatchedAliases, readonly string[]>;
 
 function readAlias(
@@ -190,6 +207,9 @@ export function parseSessionStatus(raw: unknown): SessionStatus {
   const exportRaw = readAlias(body, "export");
   matched.export = exportRaw.key;
 
+  const csrfRaw = readAlias(body, "csrfToken");
+  matched.csrfToken = csrfRaw.key;
+
   const notebooks = isRecord(notebooksRaw.value) ? notebooksRaw.value : {};
   const items = Array.isArray(notebooks.items) ? notebooks.items : [];
 
@@ -203,6 +223,10 @@ export function parseSessionStatus(raw: unknown): SessionStatus {
         typeof notebooks.error === "string" ? notebooks.error : undefined,
     },
     export: parseExport(exportRaw.value) ?? undefined,
+    csrfToken:
+      typeof csrfRaw.value === "string" && csrfRaw.value !== ""
+        ? csrfRaw.value
+        : null,
     matched,
   };
 }

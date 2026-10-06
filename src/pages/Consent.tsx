@@ -56,7 +56,12 @@ export function Consent({ onStarted }: { onStarted: () => void }) {
       */}
       <SessionCreate
         onCreated={onStarted}
-        create={(guid, secret) => api.createSession(guid, secret)}
+        create={async (guid, secret) => {
+          // The response carries the CSRF token, but the token is read from the
+          // status snapshot that `onStarted` triggers anyway — one source, and
+          // the same one that restores it after a reload.
+          await api.createSession(guid, secret);
+        }}
       />
     </section>
   );

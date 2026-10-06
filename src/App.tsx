@@ -91,6 +91,22 @@ export function App() {
     void refreshStatus();
   }, [ready, refreshStatus]);
 
+  /**
+   * The CSRF token, taken from the snapshot.
+   *
+   * `status.csrfToken` is the single source: it is set from the session-creation
+   * response and then re-read on every load, so a refresh recovers it without a
+   * second round trip.
+   *
+   * The `?? ""` at the call sites below is a deliberate last resort that should
+   * never be reached, and `missingToken` is what makes it visible if it is. An
+   * empty header produces a bare `forbidden` from the backend, which is exactly
+   * the failure mode this change exists to remove — so it gets a named cause
+   * rather than a silent empty string.
+   */
+  const csrfToken = status?.csrfToken ?? null;
+  const missingToken = status?.authenticated === true && csrfToken === null;
+
   // --- live updates ---------------------------------------------------------
   //
   // The stream is opened once a session exists. It carries the notebook list,
@@ -181,7 +197,7 @@ export function App() {
 
   const onErase = useCallback(async () => {
     try {
-      await api.erase();
+      await api.erase(csrfToken ?? "");
     } finally {
       // The local view resets even if the server call failed. Leaving a
       // credential form on screen after the user asked to erase is the worse
@@ -190,7 +206,7 @@ export function App() {
       setView("consent");
       await refreshStatus();
     }
-  }, [refreshStatus]);
+  }, [refreshStatus, csrfToken]);
 
   switch (boot.phase) {
     case "checking":
@@ -234,6 +250,15 @@ export function App() {
             </p>
           )}
 
+          {missingToken && (
+            <p className="error" role="alert">
+              This session is missing its security token, so nothing can be
+              submitted. This is a version mismatch between the page and the
+              service, not something you can retry — reload once, and if it
+              persists please report it.
+            </p>
+          )}
+
           {view === "consent" && (
             <Consent
               onStarted={() => {
@@ -251,13 +276,18 @@ export function App() {
             so there was never a path that showed the form without the consent
             text above it.
           */}
-          {view === "credential" && (
+          {/* Without a token every mutating call below would be refused with a bare
+              `forbidden`, so the pages are withheld rather than offered and
+              then broken. */}
+          {view === "credential" && !missingToken && (
             <Credential
               onSubmitted={() => {
                 setView("export");
                 void refreshStatus();
               }}
-              submit={(password) => api.submitCredential(password)}
+              submit={(password) =>
+                api.submitCredential(password, csrfToken ?? "")
+              }
             />
           )}
 
@@ -268,10 +298,10 @@ export function App() {
               export={status.export}
               streamState={stream.state}
               onList={() => {
-                void api.listNotebooks();
+                void api.listNotebooks(csrfToken ?? "");
               }}
               onStart={(notebook) => {
-                void api.startExport(notebook).then(
+                void api.startExport(notebook, csrfToken ?? "").then(
                   ({ exportId }) => {
                     // Optimistic: the stream's export-started event will
                     // confirm, but showing the card immediately beats leaving
@@ -295,7 +325,7 @@ export function App() {
                 );
               }}
               onAbort={(exportId) => {
-                void api.abort(exportId);
+                void api.abort(exportId, csrfToken ?? "");
               }}
             />
           )}

@@ -12,6 +12,9 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { api, ApiError } from "./api";
 import { API_ORIGIN } from "./protocol";
 
+/** A stand-in for the token the status snapshot supplies. */
+const TOKEN = "csrf-token-value";
+
 function stubFetch(impl: (url: string, init: RequestInit) => Response) {
   const spy = vi.fn(impl);
   vi.stubGlobal("fetch", spy);
@@ -38,7 +41,7 @@ describe("T-A1: the credential route", () => {
   it("posts the password cross-origin to the build-time API origin", async () => {
     const spy = stubFetch(() => ok(undefined));
 
-    await api.submitCredential("hunter2");
+    await api.submitCredential("hunter2", TOKEN);
 
     const [url, init] = spy.mock.calls[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/session/credential`);
@@ -48,7 +51,7 @@ describe("T-A1: the credential route", () => {
   it("sends the password as text/plain, unparsed and un-encoded", async () => {
     const spy = stubFetch(() => ok(undefined));
 
-    await api.submitCredential('{"not":"json"}');
+    await api.submitCredential('{"not":"json"}', TOKEN);
 
     const [, init] = spy.mock.calls[0]!;
     // A password that *looks* like JSON must still be transmitted verbatim.
@@ -63,7 +66,7 @@ describe("T-A1: the credential route", () => {
   it("includes credentials and forbids caching, so the cookie travels", async () => {
     const spy = stubFetch(() => ok(undefined));
 
-    await api.submitCredential("hunter2");
+    await api.submitCredential("hunter2", TOKEN);
 
     const [, init] = spy.mock.calls[0]!;
     // `credentials: "include"` is not cosmetic: the session cookie is
@@ -76,7 +79,7 @@ describe("T-A1: the credential route", () => {
   it("refuses to follow redirects, so a credential cannot be replayed", async () => {
     const spy = stubFetch(() => ok(undefined));
 
-    await api.submitCredential("hunter2");
+    await api.submitCredential("hunter2", TOKEN);
 
     const [, init] = spy.mock.calls[0]!;
     expect(init.redirect).toBe("error");
@@ -85,7 +88,7 @@ describe("T-A1: the credential route", () => {
   it("sends the CSRF header, forcing a preflight on the credential POST", async () => {
     const spy = stubFetch(() => ok(undefined));
 
-    await api.submitCredential("hunter2");
+    await api.submitCredential("hunter2", TOKEN);
 
     const [, init] = spy.mock.calls[0]!;
     // The header is not CORS-safelisted, so its presence forces a preflight,
@@ -99,7 +102,7 @@ describe("T-A1: the credential route", () => {
   it("does not retry", async () => {
     const spy = stubFetch(() => ok(undefined));
 
-    await api.submitCredential("hunter2");
+    await api.submitCredential("hunter2", TOKEN);
 
     // One submission, one outcome. A retry that replayed a password would
     // defeat the point.
@@ -116,7 +119,7 @@ describe("T-A1: the credential route", () => {
         }) as unknown as Response,
     );
 
-    const err = await api.submitCredential("hunter2").catch((e) => e);
+    const err = await api.submitCredential("hunter2", TOKEN).catch((e) => e);
 
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(429);
@@ -135,7 +138,7 @@ describe("T-A1: the credential route", () => {
         }) as unknown as Response,
     );
 
-    const err = await api.submitCredential("hunter2").catch((e) => e);
+    const err = await api.submitCredential("hunter2", TOKEN).catch((e) => e);
 
     // The status is enough. A body is not worth surfacing, and echoing an
     // arbitrary server body into the UI is how reflected content gets in.
@@ -176,7 +179,7 @@ describe("T-A3: no proxying, no user-supplied base URL", () => {
 
     // An export id carrying a path traversal must not escape the route. The
     // encoder is what stops it.
-    await api.abort("../../api/session/erase").catch(() => undefined);
+    await api.abort("../../api/session/erase", TOKEN).catch(() => undefined);
 
     const [url] = spy.mock.calls[0]!;
     // Every separator inside the id is encoded, so the path has exactly the
