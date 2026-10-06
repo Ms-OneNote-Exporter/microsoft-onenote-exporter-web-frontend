@@ -220,10 +220,21 @@ export const api = {
    * `csrfToken` is a required parameter rather than an optional one, so a call
    * site that forgets it does not compile.
    */
-  submitCredential: (password: string, csrfToken: string) =>
+  submitCredential: (account: string, password: string, csrfToken: string) =>
     request<void>("/api/session/credential", {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
+      headers: {
+        "Content-Type": "text/plain",
+        // The account is not a secret, so it rides here and leaves the body
+        // byte-identical to the password alone.
+        //
+        // The obvious alternative — account, newline, password — was rejected: a
+        // delimiter is another place for a truncation bug, and that bug has
+        // shipped twice from opposite ends of this pipe. The byte-equality
+        // guarantee over the credential body is the stronger property, and a
+        // header costs nothing to preserve it.
+        "X-Microsoft-Account": account,
+      },
       body: password,
       csrfToken,
     }),

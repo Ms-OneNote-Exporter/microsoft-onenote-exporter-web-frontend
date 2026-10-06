@@ -19,6 +19,8 @@ import { parseSessionStatus } from "./session";
 
 const TOKEN = "a".repeat(43);
 
+const ACCOUNT = "someone@example.com";
+
 function stubFetch(impl: (url: string, init: RequestInit) => Response) {
   const spy = vi.fn(impl);
   vi.stubGlobal("fetch", spy);
@@ -43,7 +45,7 @@ describe("the token is never read from a cookie", () => {
   it("ignores a readable msout_csrf cookie on the page's own origin", async () => {
     const spy = stubFetch(() => ok(undefined));
 
-    await api.submitCredential("hunter2", TOKEN);
+    await api.submitCredential(ACCOUNT, "hunter2", TOKEN);
 
     const [, init] = spy.mock.calls[0]!;
     // The whole point of this change. The cookie value must not reach the wire,
@@ -56,7 +58,7 @@ describe("the token is never read from a cookie", () => {
   it("presents the token it was given, not an empty string", async () => {
     const spy = stubFetch(() => ok(undefined));
 
-    await api.submitCredential("hunter2", TOKEN);
+    await api.submitCredential(ACCOUNT, "hunter2", TOKEN);
 
     const [, init] = spy.mock.calls[0]!;
     expect((init.headers as Record<string, string>)["X-CSRF-Token"]).not.toBe("");
@@ -65,7 +67,7 @@ describe("the token is never read from a cookie", () => {
 
 describe("every mutating route requires the token", () => {
   const cases: [string, () => Promise<unknown>][] = [
-    ["credential", () => api.submitCredential("pw", TOKEN)],
+    ["credential", () => api.submitCredential(ACCOUNT, "pw", TOKEN)],
     ["notebooks", () => api.listNotebooks(TOKEN)],
     ["export", () => api.startExport("Personal", TOKEN)],
     ["abort", () => api.abort("e1", TOKEN)],

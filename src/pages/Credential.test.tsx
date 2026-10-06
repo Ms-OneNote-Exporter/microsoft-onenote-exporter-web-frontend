@@ -25,15 +25,31 @@ import { Credential } from "./Credential";
 
 afterEach(() => cleanup());
 
-function typePassword(value: string) {
-  const input = screen.getByLabelText(
-    /microsoft account password/i,
-  ) as HTMLInputElement;
+const ACCOUNT = "someone@example.com";
+
+function typeAccount(value: string = ACCOUNT) {
+  const input = screen.getByLabelText(/microsoft account/i) as HTMLInputElement;
   fireEvent.change(input, { target: { value } });
   return input;
 }
 
+function typePassword(value: string) {
+  const input = screen.getByLabelText(/^password$/i) as HTMLInputElement;
+  fireEvent.change(input, { target: { value } });
+  return input;
+}
+
+/** Fill both halves, since neither alone can be submitted. */
+function fillBoth(password: string, account: string = ACCOUNT) {
+  typeAccount(account);
+  return typePassword(password);
+}
+
 describe("the credential form", () => {
+  // `submit` receives both halves, asserted as a pair everywhere. A transposed
+  // pair is the failure this form cannot catch by itself: the request would be
+  // well-formed and the login would simply fail.
+
   it("sends the password exactly as typed", async () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     const onSubmitted = vi.fn();
@@ -41,10 +57,50 @@ describe("the credential form", () => {
 
     // Leading, inner and trailing spaces are all part of a real password.
     const password = "  hunter2  with  spaces  ";
-    typePassword(password);
-    fireEvent.click(screen.getByRole("button", { name: /send password/i }));
+    fillBoth(password);
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
 
-    await vi.waitFor(() => expect(submit).toHaveBeenCalledWith(password));
+    await vi.waitFor(() =>
+      expect(submit).toHaveBeenCalledWith(ACCOUNT, password),
+    );
+  });
+
+  it("sends the account unmodified too, spaces included", async () => {
+    const submit = vi.fn().mockResolvedValue(undefined);
+    render(<Credential onSubmitted={() => {}} submit={submit} />);
+
+    typeAccount("  spaced account  ");
+    typePassword("pw");
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
+
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledWith("  spaced account  ", "pw"));
+  });
+
+  it("sends a username, not only an email-shaped value", async () => {
+    // Microsoft accepts a username or a phone number at that field, so the
+    // account must not be validated as an address. Rejecting one is a dead end
+    // with no explanation shown.
+    const submit = vi.fn().mockResolvedValue(undefined);
+    render(<Credential onSubmitted={() => {}} submit={submit} />);
+
+    typeAccount("jane.doe");
+    typePassword("pw");
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
+
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledWith("jane.doe", "pw"));
+  });
+
+  it("will not submit until both halves are present", () => {
+    const submit = vi.fn().mockResolvedValue(undefined);
+    render(<Credential onSubmitted={() => {}} submit={submit} />);
+
+    // Neither alone is a sign-in. The button stays disabled rather than sending
+    // a request that is known to be incomplete.
+    typePassword("pw");
+    expect(
+      (screen.getByRole("button", { name: /send sign-in details/i }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
 
   it("cannot send a newline at all: the browser strips every one", () => {
@@ -61,12 +117,13 @@ describe("the credential form", () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     render(<Credential onSubmitted={() => {}} submit={submit} />);
 
+    typeAccount();
     const input = typePassword("hunter\n2");
 
     expect(input.value).toBe("hunter2");
-    fireEvent.click(screen.getByRole("button", { name: /send password/i }));
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
 
-    expect(submit).toHaveBeenCalledWith("hunter2");
+    expect(submit).toHaveBeenCalledWith(ACCOUNT, "hunter2");
   });
 
   it("never mangles the value it receives", async () => {
@@ -76,10 +133,10 @@ describe("the credential form", () => {
     render(<Credential onSubmitted={() => {}} submit={submit} />);
 
     const password = "\t pass word \t ";
-    typePassword(password);
-    fireEvent.click(screen.getByRole("button", { name: /send password/i }));
+    fillBoth(password);
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
 
-    await vi.waitFor(() => expect(submit).toHaveBeenCalledWith(password));
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledWith(ACCOUNT, password));
   });
 
   it("does not trim a trailing newline, because the browser already removed it", () => {
@@ -89,26 +146,27 @@ describe("the credential form", () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     render(<Credential onSubmitted={() => {}} submit={submit} />);
 
-    const input = typePassword("hunter2\n");
+    const input = fillBoth("hunter2\n");
 
     expect(input.value).toBe("hunter2");
-    fireEvent.click(screen.getByRole("button", { name: /send password/i }));
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
 
-    expect(submit).toHaveBeenCalledWith("hunter2");
+    expect(submit).toHaveBeenCalledWith(ACCOUNT, "hunter2");
   });
 
-  it("clears the password from the DOM after a successful send", async () => {
+  it("clears both halves from the DOM after a successful send", async () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     const onSubmitted = vi.fn();
     render(<Credential onSubmitted={onSubmitted} submit={submit} />);
 
-    const input = typePassword("hunter2");
-    fireEvent.click(screen.getByRole("button", { name: /send password/i }));
+    const input = fillBoth("hunter2");
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
     await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalled());
 
-    // A password left in the DOM is a password left in the DOM after the form
-    // has done its job, including in any later screenshot or DOM dump.
+    // Left in the DOM after the form has done its job is a credential left in
+    // the DOM, including in any later screenshot or DOM dump.
     expect(input.value).toBe("");
+    expect((screen.getByLabelText(/microsoft account/i) as HTMLInputElement).value).toBe("");
   });
 
   it("keeps the password so it can be retried by hand after a failure", async () => {
@@ -118,8 +176,8 @@ describe("the credential form", () => {
     const submit = vi.fn().mockRejectedValue(new Error("network"));
     render(<Credential onSubmitted={() => {}} submit={submit} />);
 
-    const input = typePassword("hunter2");
-    fireEvent.click(screen.getByRole("button", { name: /send password/i }));
+    const input = fillBoth("hunter2");
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
     await vi.waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
 
     expect(input.value).toBe("hunter2");
@@ -129,8 +187,8 @@ describe("the credential form", () => {
     const submit = vi.fn().mockRejectedValue(new Error("network"));
     render(<Credential onSubmitted={() => {}} submit={submit} />);
 
-    typePassword("hunter2");
-    fireEvent.click(screen.getByRole("button", { name: /send password/i }));
+    fillBoth("hunter2");
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
     await vi.waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
 
     // One submission, one outcome. A retry that replayed a password would
@@ -145,7 +203,7 @@ describe("the credential form", () => {
     const submit = vi.fn().mockResolvedValue(undefined);
     render(<Credential onSubmitted={() => {}} submit={submit} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /send password/i }));
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
     expect(submit).not.toHaveBeenCalled();
   });
 });
