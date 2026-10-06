@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.npm/
+
+# Build output. dist/ is generated on the hosting platform from the lockfile,
+# not committed from here - the served bytes come from Hostinger's build, which
+# is exactly why dist/ASSETS.sha256 and the scheduled attestation job exist
+# (PLANNING/PLAN-v3.md §7.1). Committing dist/ would create a second, stale
+# source of truth for what is live.
+dist/
+
+# tsc -b incremental state. Regenerated on every build and meaningless in git.
+*.tsbuildinfo
+
+# Local env. Holds the API origin, which is build-time configuration only.
+# There is deliberately no user-supplied API base URL anywhere in this
+# repository: that would turn the operator's origin into an open proxy and
+# would let a substituted bundle choose where the credential goes.
+.env
+.env.local
+*.env
+!.env.example
+
+# OS noise
+.DS_Store
+*.log
+
+# review scratch
+reviews/
+
+# Loose plan drafts are personal. The design documents live in the backend
+# repository under PLANNING/ and are cited by section number from this code.
+PLAN*.md

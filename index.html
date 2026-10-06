@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OneNote Exporter</title>
+    <!--
+      No inline <script> here, deliberately.
+
+      §1.5 ships `script-src 'self'` with no nonce support, because this is
+      static hosting with no request-time hook. A strict CSP and an inline
+      script do not coexist: the page breaks the first time anyone adds one.
+      The common Vite templates ship a theme-flash prevention script for
+      exactly this reason, and it is the usual first thing to break a strict
+      policy.
+
+      If one is ever genuinely needed, the build computes its SHA-256 and
+      writes the 'sha256-…' source into dist/CSP-HASHES.txt — see
+      vite/asset-attestation.ts. Do not add it by hand.
+
+      No external <link> either: no webfont CDN, no preconnect. `style-src
+      'self'` forbids it, and T-F2 asserts the served HTML contains no
+      external <script>, <iframe> or <link>.
+    -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

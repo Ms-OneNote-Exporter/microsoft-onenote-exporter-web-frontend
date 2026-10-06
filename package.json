@@ -1,0 +1,31 @@
+{
+  "name": "microsoft-onenote-exporter-web-frontend",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Component A: the static React build. No session state, no secret, no credential, no authorisation logic. Talks HTTP to the backend on a different origin.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.13.5",
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "@vitejs/plugin-react": "4.3.4",
+    "typescript": "5.7.3",
+    "vite": "6.4.3",
+    "vitest": "5.0.3"
+  }
+}
