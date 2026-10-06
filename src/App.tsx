@@ -367,6 +367,7 @@ export function App() {
                               state: "queued",
                               progress: null,
                               partialReason: null,
+                              error: null,
                               downloadUrl: null,
                               fileName: null,
                               artifactPartial: false,

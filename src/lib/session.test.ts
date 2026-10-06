@@ -248,3 +248,38 @@ describe("the CSRF token", () => {
     expect(result.value.csrfToken).toBeNull();
   });
 });
+describe("export.error, added after the first deployment", () => {
+  const failing = (over: Record<string, unknown> = {}) =>
+    parse({
+      export: {
+        state: "failed",
+        partialReason: null,
+        id: "e1",
+        notebook: "Personal",
+        progress: null,
+        startedAt: null,
+        finishedAt: null,
+        ...over,
+      },
+    }).export;
+
+  it("carries the server's own text", () => {
+    // The api is explicit that it is short and already safe to display, so it is
+    // rendered as-is. A generic sentence alone leaves the user with no idea what
+    // to do differently next time.
+    expect(failing({ error: "the container was killed" })?.error).toBe(
+      "the container was killed",
+    );
+  });
+
+  it("is null when absent, on a backend predating the field", () => {
+    // Read opportunistically: a missing optional field is not a version
+    // mismatch, and failing the whole parse over one would break every page for
+    // a cosmetic gain.
+    expect(failing()?.error).toBeNull();
+  });
+
+  it("is null when the server sends an empty string", () => {
+    expect(failing({ error: "" })?.error).toBeNull();
+  });
+});

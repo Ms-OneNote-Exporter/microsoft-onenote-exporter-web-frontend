@@ -252,7 +252,12 @@ function describeExport(running: RunningExport): string {
     case "done":
       return "Everything has been written to the vault.";
     case "failed":
-      return "The export failed. Nothing was completed, so you can start again.";
+      // The server's own text, appended. It is already safe to display per the
+      // api, and a generic sentence alone leaves the user with no idea what to
+      // do differently next time.
+      return running.error
+        ? `The export failed: ${running.error} Nothing was completed, so you can start again.`
+        : "The export failed. Nothing was completed, so you can start again.";
     case "partial":
       switch (running.partialReason) {
         case "aborted":
