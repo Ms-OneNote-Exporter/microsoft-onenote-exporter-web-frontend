@@ -40,6 +40,7 @@
  */
 import { useState } from "react";
 import { ApiError } from "../lib/api";
+import { MfaLimitation } from "./MfaLimitation";
 
 export interface CredentialProps {
   onSubmitted: () => void;
@@ -143,6 +144,10 @@ export function Credential({ onSubmitted, submit }: CredentialProps) {
       <button type="submit" disabled={!canSubmit}>
         {busy ? "Sending…" : "Send sign-in details"}
       </button>
+
+      {/* Stated here, before the user submits, rather than as a failure
+          afterwards. A dead end with no explanation is what this avoids. */}
+      <MfaLimitation />
 
       <p className="fineprint">
         One submission, one attempt. It is not retried automatically, because a
