@@ -63,14 +63,94 @@ engineering, not silent capture.
 That is **containment, not prevention**, and the build attestation is
 **detection**. Neither is oversold in the docs.
 
+## Outstanding questions
+
+**These are open contract items, not a task list.** Each one is a decision the
+backend owns. They are listed here rather than left in a comment because a
+reader of this file cannot see the two repositories' correspondence, and the
+code makes deliberate guesses that a reviewer needs to know are guesses.
+
+### 1. Which origin serves `GET /files/:artifactId`?
+
+The status snapshot's artifacts carry an optional `url`, and the frontend uses
+it when present, falling back to a relative `/files/<id>`. So the answer is not
+load-bearing *provided the backend sends the URL*.
+
+Consequences differ and neither is free:
+
+| | Relative (static host) | Absolute (API origin) |
+|---|---|---|
+| `download` attribute | honoured | ignored — browser navigates |
+| Filename | server `Content-Disposition` | needs `Access-Control-Expose-Headers: Content-Disposition` |
+| New CSP surface | none (`connect-src` unchanged) | none, same origin as the API |
+| Host config | **Caddy must serve `/files/`** on the static root | none |
+
+The risk asymmetry matters more than the table. If Caddy is not configured for
+`/files/`, the failure is a 404 **after a completed export** — the worst moment
+to discover it. If the backend simply sends `url`, none of this applies.
+
+### 2. What are the §7.5 snapshot field names?
+
+Guessed: `authenticated`, `signedIn`, `notebooks`, `export`.
+
+Each field resolves through an alias list (`signed_in`, `isSignedIn`,
+`runningExport`, `currentExport`, `job`, …) and `parseSessionStatus` returns
+`matched`, recording which key satisfied each field.
+
+**This mitigation is not free, and the cost is the important part:** an alias
+table turns a loud failure into a quiet one. A typo in the backend's JSON now
+produces a "signed in as false" page rather than a parse error. That is a worse
+failure mode than the one it hides, and on a screen where a wrong read bounces a
+user back to the credential form it is not obviously worth it.
+
+Once the names are agreed the aliases should be deleted, and `matched` replaced
+by a test asserting the canonical spelling is the one in use. If the backend
+would rather have a hard failure on an unknown key, that is a one-line change
+and probably the better default.
+
+### 3. What are the notebook `state` values?
+
+Only `loaded` and `failed` were ever specified. Rendered: `idle`, `listing`,
+`loaded`, `failed`, and `unknown`. An unrecognised value shows a visible
+"unrecognised notebook state" message naming the raw value.
+
+The unknown branch is deliberate: mapping an unknown state to `idle` renders
+"No notebooks listed yet", which is indistinguishable from a working empty
+account — and a broken page nobody reports.
+
+### 4. Is the SSE event set right?
+
+The frontend listens for `notebooks-listed`, `export-started`,
+`export-progress`, `export-ended`, `signed-in` and `session-ended`. Unmodelled
+events are ignored rather than treated as an error, so a new backend event is
+harmless — but an event the frontend needs under a different name is silent.
+
+### 5. Does the backend ever want a client-side password trim?
+
+No, and it should not. `<input type="password">` runs the HTML value
+sanitization algorithm: browsers strip **every** CR and LF before React sees the
+value, so `"hunter\n2"` arrives as `"hunter2"`. An earlier version of the
+credential form tried to detect a trailing paste newline and ask the user to
+confirm a trimmed value; that was unreachable code and was removed.
+
+The consequence is a real limitation rather than a bug to fix: a user whose
+password genuinely contains a newline is signed in with a different password and
+sees an ordinary rejection. Nothing in this repository can prevent it.
+
 ## Layout
 
 ```
 src/lib/protocol.ts        EXPECTED_PROTOCOL + the build-time API origin
 src/lib/api.ts             every request; the credential route; the boot handshake
 src/lib/events.ts          cross-origin SSE, withCredentials, replay via Last-Event-ID
+src/lib/session.ts         snapshot types + tolerant parsers (see Outstanding questions)
+src/lib/useEventStream.ts  the SSE transport as React state
 src/lib/session-secret.ts  client-side 256-bit secret + GUID generation
-src/App.tsx                boot shell: handshake states, and the consent block
+src/App.tsx                boot shell, view selection, SSE event handling
+src/pages/Consent.tsx      the disclosure (T-F7 asserts this, against rendered text)
+src/pages/SessionCreate.tsx  GUID entry, "generate for me", unrecoverable warning
+src/pages/Credential.tsx   the password form; sends the value byte-for-byte
+src/pages/NotebookPicker.tsx  chooser, export progress, artifact downloads
 vite/asset-attestation.ts  the two build artefacts above
 ```
 
@@ -113,6 +193,8 @@ cp .env.example .env      # set VITE_API_ORIGIN
 npm ci
 npm run dev               # http://localhost:5173, talking to the backend origin
 npm run build             # emits dist/ + the two attestation artefacts
+npm run typecheck
+npm test
 ```
 
 `VITE_API_ORIGIN` must be an exact origin: `https:` in production, no path, no
@@ -120,14 +202,44 @@ trailing slash. There is deliberately no user-supplied base URL anywhere — tha
 would turn this origin into an open proxy and would let a substituted bundle
 choose where the credential goes.
 
-## Not built yet
+## Status
 
-This is a scaffold: the layout, the licence, the build-time contract, the API
-client, the SSE client, the secret generator and the boot shell. The pages
-themselves — landing, session, export flow, refresh restore — are §12 step 12,
-and the hosting setup is step 13. The consent copy in `src/App.tsx` is
-finished, because it is a claim made to the user and is asserted against the
-rendered string (`T-F7`) rather than against a mechanism.
+The pages are built (§12 step 12): session creation, the credential form, the
+notebook chooser with export progress, and refresh-restore off the status
+snapshot. The consent copy is finished, because it is a claim made to the user
+and is asserted against the rendered text (`T-F7`) rather than against a
+mechanism.
+
+Two items from §12 step 12 remain:
+
+- **Hosting setup is step 13** and is not done. In particular `/files/` routing
+  on the static host is unconfirmed — see Outstanding questions.
+- **No end-to-end run against a real backend.** Every test in this repository
+  runs against stubs. There is no equivalent here to the fake-Docker-daemon smoke
+  test on the backend side, which is a real gap: a mocked `fetch` cannot tell you
+  that a route is missing, that a cookie is not being set, or that CORS refuses
+  a preflight. The first run against a live backend should be expected to find
+  something.
+
+### Tests
+
+`npm test` — 80 tests. Those cited by ID elsewhere in this file are real and
+named in the test sources:
+
+| ID | Asserts | File |
+|---|---|---|
+| `T-A1` | the credential is never parsed, forwarded, retried or cached | `src/lib/api.test.ts` |
+| `T-A3` | no proxying; the origin comes from the build-time constant | `src/lib/api.test.ts` |
+| `T-A4` | `API_ORIGIN` is an exact origin (it also lands in `connect-src`) | `src/lib/api.test.ts` |
+| `T-S4` | `withCredentials: true` on the `EventSource` | `src/lib/events.test.ts` |
+| `T-F2` | the served HTML references nothing external | `src/pages/consent.test.tsx` |
+| `T-F7` | the consent copy, against rendered text | `src/pages/consent.test.tsx` |
+| `T-F5` | the four boot states, incl. the version-mismatch screen | `src/App.test.tsx` |
+
+Two bugs were found by writing these: the credential route was JSON-encoding the
+password (`"hunter2"` on the wire, quotes included), and `abort()` was
+interpolating an unencoded export id. Both are fixed in
+[`68089f5`](https://github.com/Ms-OneNote-Exporter/microsoft-onenote-exporter-web-frontend/commit/68089f5).
 
 ## Licence
 
