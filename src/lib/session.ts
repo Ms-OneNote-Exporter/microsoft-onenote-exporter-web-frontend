@@ -1,280 +1,293 @@
 /**
- * Session and export state, as the backend reports it.
+ * Session state, as the backend reports it.
  *
- * These types describe PLAN-v2 §7.5's `/api/session/status` snapshot and the
- * SSE events that keep it current. They are **hand-written literals** for the
- * same reason `protocol.ts` is: the two repos deploy independently, so the shape
- * is a contract we both assert rather than a package we both import.
+ * This mirrors `SessionSnapshot` in the api repository (`api/src/auth.ts`) and the
+ * event names in `api/src/sse.ts`. Those two files are the contract; this is a
+ * transcription of them, and where the two disagree, they are right and this is
+ * wrong.
  *
- * ## Why the parsers are alias-tolerant
+ * ## An earlier version of this file guessed, and it was wrong
  *
- * The field names below were a guess. They are still a guess — the contract
- * discussion with Component B has not settled them — so rather than hard-code
- * one spelling and be silently wrong if the other side picked a different one,
- * each field is resolved through a list of accepted aliases.
+ * This previously modelled the snapshot as flat booleans — `authenticated`,
+ * `signedIn` — with an **alias table** accepting several spellings of each, on
+ * the theory that being permissive would let the page degrade instead of
+ * throwing. Both halves of that were mistakes:
  *
- * The cost is real and worth stating: a typo in the *server* now produces a
- * "signed in as false" page instead of a loud parse failure. That is why
- * `parseSessionStatus` also returns `matched` — the alias table records which key
- * actually satisfied each field. When the two implementations agree, every entry
- * is either the canonical name or an alias that is never used, and the aliases
- * can be deleted in a follow-up with a test proving the canonical name is the
- * one in use. Until then, `matched` is the diagnostic and guessing wrong costs a
- * broken page rather than a silent data-corruption bug.
+ * The real shape is nested enums. There is no `signedIn` boolean to alias;
+ * `auth.state` is `"none" | "authenticating" | "valid" | "expired" | "failed"`.
+ * And `export.id` is not `export.exportId`, `export.progress` is an object
+ * rather than a string, and there is a single `artifact.downloadUrl` rather than
+ * an array of artifacts.
  *
- * The alternative was opening the pages against names nobody had agreed to and
- * discovering the mismatch during an export.
+ * Worse, the alias table turned a loud failure into a quiet one — exactly the
+ * risk it was written to avoid. With no `signedIn` key present, every lookup
+ * missed, and the page rendered "no session, no export" indefinitely while
+ * looking entirely normal. A user would not report that; they would conclude the
+ * service was broken.
+ *
+ * So there is **no alias table here**, and an unrecognised value is surfaced
+ * rather than absorbed. That is a deliberate reversal, not an oversight.
  */
+
+/**
+ * `SessionState` in the api. `erased` cannot reach a snapshot — the erase
+ * machine deletes the row, so there is nothing to build one from.
+ */
+export type SessionState =
+  | "created"
+  | "authenticating"
+  | "authenticated"
+  | "exporting"
+  | "erasing"
+  | "erased";
+
+/** `AuthState` in the api. Mirrored here; not re-derived. */
+export type AuthState =
+  | "none"
+  | "authenticating"
+  | "valid"
+  | "expired"
+  | "failed";
 
 /** Progress of the notebook listing, which runs a CLI in the runner. */
 export type NotebookState = "idle" | "listing" | "loaded" | "failed";
 
-/**
- * Optional fields are declared `| undefined` rather than bare `?` because this
- * project compiles with `exactOptionalPropertyTypes`. Without the explicit
- * `undefined`, "this key is absent" and "this key is present and undefined"
- * become the same type, and building an object that sets `export: undefined` to
- * *clear* it stops typechecking. Clearing a field by setting it to undefined is
- * exactly what the SSE handlers do.
- */
-export interface NotebookList {
-  /** Raw value from the server, before normalisation. */
-  state: string;
-  items: string[];
-  /** Present when `state` is `failed`. */
-  error?: string | undefined;
-}
-
-export interface SessionStatus {
-  /** True once the session exists and its cookie has been set. */
-  authenticated: boolean;
-  /** True once the Microsoft password has been accepted for this session. */
-  signedIn: boolean;
-  notebooks: NotebookList;
-  /** The running export, if any. Drives refresh-restore during an export. */
-  export?: RunningExport | undefined;
-  /**
-   * The CSRF token every mutating request must present, or null.
-   *
-   * **The snapshot carries this because in-memory alone does not survive a
-   * reload.** The token was previously a readable cookie the page echoed into a
-   * header; that cannot work across origins, so it arrives in a body instead —
-   * which means a refresh has nothing to echo. `/api/session/status` is already
-   * fetched on every load, so putting it here costs no extra round trip and no
-   * new route.
-   *
-   * Null means the backend did not send one. That is a contract mismatch and is
-   * surfaced as such, rather than being papered over by sending an empty header
-   * and collecting a `forbidden` from every mutating route.
-   */
-  csrfToken: string | null;
-  /** Which alias satisfied each field. Diagnostic; see the note above. */
-  matched: MatchedAliases;
-}
-
-export interface MatchedAliases {
-  authenticated?: string | undefined;
-  signedIn?: string | undefined;
-  notebooks?: string | undefined;
-  export?: string | undefined;
-  csrfToken?: string | undefined;
-}
-
 export type ExportState =
+  | "none"
   | "queued"
   | "running"
   | "done"
-  | "failed"
-  | "aborted";
+  | "partial"
+  | "failed";
+
+/**
+ * Why a partial export stopped.
+ *
+ * Carried separately from `state` because `partial` alone cannot be rendered
+ * honestly: telling someone "you stopped this export" is factually false when the
+ * quota or the disk filled up, and sends them looking for something they did not
+ * do. The difference between "try again" and "free some space and try again" is
+ * the entire point of telling them at all.
+ */
+export type PartialReason = "aborted" | "quota" | "disk";
+
+/** `export.progress` — counts, not a sentence. */
+export interface ExportProgress {
+  pages: number;
+  sections: number;
+  assets: number;
+}
 
 export interface RunningExport {
-  exportId: string;
+  /** `export.id` in the api. Never called `exportId`. */
+  id: string;
   notebook: string;
   state: ExportState;
-  /** Server-assigned, opaque. Shown to the user for support, never parsed. */
-  progress?: string | undefined;
-  /** Populated when `state` is `failed`. */
-  error?: string | undefined;
-  /** Download links, populated when `state` is `done`. */
-  artifacts?: Artifact[] | undefined;
+  progress: ExportProgress | null;
+  partialReason: PartialReason | null;
+  /** `artifact.downloadUrl`, supplied by the server. */
+  downloadUrl: string | null;
+  fileName: string | null;
+  /** The artifact is partial, so the download is incomplete. */
+  artifactPartial: boolean;
 }
 
-export interface Artifact {
-  artifactId: string;
-  name: string;
-  bytes?: number | undefined;
+export interface NotebookList {
+  state: NotebookState;
+  items: string[];
+}
+
+/**
+ * A parsed snapshot, or the reason it could not be parsed.
+ *
+ * A failure is a value rather than a thrown error, because the user-facing
+ * consequence of a mismatch is "this page is out of date", not a stack trace —
+ * and because the alternative, degrading quietly, is what this file used to do.
+ */
+export type Snapshot =
+  | { ok: true; value: SessionStatus }
+  | { ok: false; problems: string[] };
+
+export interface SessionStatus {
+  /** True when the session exists and is usable. Derived, never sent. */
+  hasSession: boolean;
+  sessionState: SessionState;
+  authState: AuthState;
   /**
-   * An absolute or origin-relative URL supplied by the server.
+   * True only for `auth.state === "valid"`.
    *
-   * Preferred over constructing `/files/<id>` here, because whether
-   * `GET /files/:artifactId` is served by the static host (Caddy plus
-   * `forward_auth`) or by the API origin was still undecided when this was
-   * written, and the two produce a different href. When the server supplies the
-   * URL, this component never has to be right about it.
+   * `expired` and `failed` are deliberately *not* distinguished in the UI:
+   * Microsoft can invalidate a session cookie out from under the browser and a
+   * crashed OneNote tab produces the same observable error, so the client cannot
+   * honestly tell the user which happened. Sending them to the credential form
+   * is right for both.
    */
-  url?: string | undefined;
+  signedIn: boolean;
+  notebooks: NotebookList;
+  export: RunningExport | null;
+  csrfToken: string | null;
 }
 
 /**
- * Canonical name first, then accepted aliases. First match wins.
+ * parseSessionStatus reads the snapshot, or explains why it could not.
  *
- * Keeping the canonical spelling at index 0 means that once the server settles
- * on one name, the `matched` map will show it and the rest can be deleted.
+ * Strict on purpose. Every field is required by the interface, so a missing one
+ * is a genuine mismatch and is reported rather than defaulted — the failure that
+ * motivated this rewrite.
  */
-const ALIASES = {
-  authenticated: ["authenticated", "session", "hasSession", "session_exists"],
-  signedIn: ["signedIn", "signed_in", "isSignedIn", "credential_accepted"],
-  notebooks: ["notebooks", "notebookList", "notebook_list"],
-  export: ["export", "runningExport", "running_export", "currentExport", "job"],
-  csrfToken: ["csrfToken", "csrf_token"],
-} as const satisfies Record<keyof MatchedAliases, readonly string[]>;
-
-function readAlias(
-  body: Record<string, unknown>,
-  field: keyof typeof ALIASES,
-): { key: string | undefined; value: unknown } {
-  for (const key of ALIASES[field]) {
-    if (key in body) return { key, value: body[key] };
-  }
-  return { key: undefined, value: undefined };
-}
-
-/**
- * Normalise the server's notebook state without assuming a closed union.
- *
- * The union was never agreed, and treating an unknown value as `idle` renders
- * "No notebooks listed yet" — indistinguishable from a working empty account,
- * which is the kind of failure nobody reports. Mapping to `unknown` keeps an
- * empty listing and an unrecognised state visibly different, and names the raw
- * value so a user can report something specific.
- */
-export function notebookStatus(raw: unknown): NotebookStatusView {
+export function parseSessionStatus(raw: unknown): Snapshot {
+  const problems: string[] = [];
   if (!isRecord(raw)) {
-    return { kind: "unknown", items: [], rawState: "(not an object)" };
+    return { ok: false, problems: ["the session snapshot was not a JSON object"] };
   }
 
-  const state = typeof raw.state === "string" ? raw.state : "";
-  const items = Array.isArray(raw.items)
-    ? raw.items.filter((n: unknown): n is string => typeof n === "string")
-    : [];
+  const session = isRecord(raw.session) ? raw.session : null;
+  if (session === null) problems.push("missing `session`");
+  const auth = isRecord(raw.auth) ? raw.auth : null;
+  if (auth === null) problems.push("missing `auth`");
+  const notebooks = isRecord(raw.notebooks) ? raw.notebooks : null;
+  if (notebooks === null) problems.push("missing `notebooks`");
+  const exportRaw = isRecord(raw.export) ? raw.export : null;
+  if (exportRaw === null) problems.push("missing `export`");
+  const artifact = isRecord(raw.artifact) ? raw.artifact : null;
+  if (artifact === null) problems.push("missing `artifact`");
 
-  switch (state) {
-    case "idle":
-      return { kind: "idle", items };
-    case "listing":
-      return { kind: "listing", items };
-    case "loaded":
-      return { kind: "loaded", items };
-    case "failed":
-      return {
-        kind: "failed",
-        items,
-        error: typeof raw.error === "string" ? raw.error : "Listing failed",
-      };
-    default:
-      return { kind: "unknown", items, rawState: state || "(absent)" };
+  if (problems.length > 0) {
+    return { ok: false, problems };
   }
-}
 
-export type NotebookStatusView =
-  | { kind: "idle"; items: string[] }
-  | { kind: "listing"; items: string[] }
-  | { kind: "loaded"; items: string[] }
-  | { kind: "failed"; items: string[]; error: string }
-  | { kind: "unknown"; items: string[]; rawState: string };
+  const sessionState = asEnum(session!.state, SESSION_STATES, "session.state", problems);
+  const authState = asEnum(auth!.state, AUTH_STATES, "auth.state", problems);
 
-/**
- * Parse `/api/session/status` into a `SessionStatus`.
- *
- * Tolerant by construction: every field is checked, and a malformed body becomes
- * a status that reports nothing rather than a throw. A backend that is
- * mid-deploy or misconfigured should produce a page that says "cannot read the
- * session", not a blank screen.
- */
-export function parseSessionStatus(raw: unknown): SessionStatus {
-  const body = isRecord(raw) ? raw : {};
-  const matched: MatchedAliases = {};
+  const notebookState = asEnum(
+    notebooks!.state,
+    NOTEBOOK_STATES,
+    "notebooks.state",
+    problems,
+  );
 
-  const auth = readAlias(body, "authenticated");
-  matched.authenticated = auth.key;
+  const exportState = asEnum(
+    exportRaw!.state,
+    EXPORT_STATES,
+    "export.state",
+    problems,
+  );
 
-  const signedIn = readAlias(body, "signedIn");
-  matched.signedIn = signedIn.key;
+  if (problems.length > 0) return { ok: false, problems };
 
-  const notebooksRaw = readAlias(body, "notebooks");
-  matched.notebooks = notebooksRaw.key;
+  const items = Array.isArray(notebooks!.items) ? notebooks!.items : [];
+  if (!Array.isArray(notebooks!.items)) {
+    problems.push("`notebooks.items` was not an array");
+  }
 
-  const exportRaw = readAlias(body, "export");
-  matched.export = exportRaw.key;
+  // The api documents that only leaves are optional and an absent leaf is
+  // `null`, so a null id genuinely means "no export" rather than "malformed".
+  const id = exportRaw!.id;
+  const hasExport =
+    exportState !== "none" &&
+    (typeof id === "string" || typeof exportRaw!.notebook === "string");
 
-  const csrfRaw = readAlias(body, "csrfToken");
-  matched.csrfToken = csrfRaw.key;
+  const running: RunningExport | null = hasExport
+    ? {
+        id: typeof id === "string" ? id : "",
+        notebook: str(exportRaw!.notebook),
+        state: exportState as ExportState,
+        progress: parseProgress(exportRaw!.progress),
+        partialReason: asPartialReason(exportRaw!.partialReason),
+        downloadUrl: str(artifact!.downloadUrl) || null,
+        fileName: str(artifact!.fileName) || null,
+        artifactPartial: artifact!.partial === true,
+      }
+    : null;
 
-  const notebooks = isRecord(notebooksRaw.value) ? notebooksRaw.value : {};
-  const items = Array.isArray(notebooks.items) ? notebooks.items : [];
+  if (problems.length > 0) return { ok: false, problems };
 
   return {
-    authenticated: truthy(auth.value),
-    signedIn: truthy(signedIn.value),
-    notebooks: {
-      state: typeof notebooks.state === "string" ? notebooks.state : "",
-      items: items.filter((n: unknown): n is string => typeof n === "string"),
-      error:
-        typeof notebooks.error === "string" ? notebooks.error : undefined,
+    ok: true,
+    value: {
+      hasSession: sessionState !== "erased" && sessionState !== "erasing",
+      sessionState: sessionState as SessionState,
+      authState: authState as AuthState,
+      signedIn: authState === "valid",
+      notebooks: {
+        state: notebookState as NotebookState,
+        items: items.filter((n: unknown): n is string => typeof n === "string"),
+      },
+      export: running,
+      csrfToken:
+        typeof raw.csrfToken === "string" && raw.csrfToken !== ""
+          ? raw.csrfToken
+          : null,
     },
-    export: parseExport(exportRaw.value) ?? undefined,
-    csrfToken:
-      typeof csrfRaw.value === "string" && csrfRaw.value !== ""
-        ? csrfRaw.value
-        : null,
-    matched,
   };
 }
+
+const SESSION_STATES = [
+  "created",
+  "authenticating",
+  "authenticated",
+  "exporting",
+  "erasing",
+  "erased",
+] as const;
+
+const AUTH_STATES = [
+  "none",
+  "authenticating",
+  "valid",
+  "expired",
+  "failed",
+] as const;
+
+const NOTEBOOK_STATES = ["idle", "listing", "loaded", "failed"] as const;
+
+const EXPORT_STATES = [
+  "none",
+  "queued",
+  "running",
+  "done",
+  "partial",
+  "failed",
+] as const;
+
+const PARTIAL_REASONS = ["aborted", "quota", "disk"] as const;
 
 /**
- * Only a real `true` counts as true.
+ * An out-of-union value is a problem, not a value to pass through.
  *
- * Not truthiness: a backend that serialises `"true"` or `1` would otherwise be
- * read as signed in, and the credential page is the one screen where being wrong
- * in that direction sends a user to type their password again.
+ * The api validates `partialReason` on read and turns an out-of-union stored
+ * value into `null`, so this should never fire. It is here so that a future
+ * widening of either union shows up as a named mismatch on the page instead of a
+ * component rendering a state it has no branch for.
  */
-function truthy(value: unknown): boolean {
-  if (typeof value === "boolean") return value;
-  if (isRecord(value)) return true;
-  return false;
-}
-
-/** Parse an export from a status snapshot or an SSE payload. Shared. */
-export function parseExport(raw: unknown): RunningExport | null {
-  if (!isRecord(raw)) return null;
-  if (typeof raw.exportId !== "string") return null;
-
-  const notebook = typeof raw.notebook === "string" ? raw.notebook : "";
-
-  return {
-    exportId: raw.exportId,
-    notebook,
-    state: (typeof raw.state === "string" ? raw.state : "running") as ExportState,
-    progress: typeof raw.progress === "string" ? raw.progress : undefined,
-    error: typeof raw.error === "string" ? raw.error : undefined,
-    artifacts: parseArtifacts(raw.artifacts),
-  };
-}
-
-function parseArtifacts(value: unknown): Artifact[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const out: Artifact[] = [];
-  for (const item of value) {
-    if (!isRecord(item)) continue;
-    if (typeof item.artifactId !== "string") continue;
-    out.push({
-      artifactId: item.artifactId,
-      name: typeof item.name === "string" ? item.name : item.artifactId,
-      bytes: typeof item.bytes === "number" ? item.bytes : undefined,
-      url: typeof item.url === "string" ? item.url : undefined,
-    });
+function asEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  label: string,
+  problems: string[],
+): T | "" {
+  if (typeof value === "string" && (allowed as readonly string[]).includes(value)) {
+    return value as T;
   }
-  return out;
+  problems.push(`${label} was ${JSON.stringify(value)}, not one of ${allowed.join(" | ")}`);
+  return "";
+}
+
+function asPartialReason(value: unknown): PartialReason | null {
+  return typeof value === "string" && (PARTIAL_REASONS as readonly string[]).includes(value)
+    ? (value as PartialReason)
+    : null;
+}
+
+function parseProgress(value: unknown): ExportProgress | null {
+  if (!isRecord(value)) return null;
+  const num = (key: string) => (typeof value[key] === "number" ? value[key] : 0);
+  return { pages: num("pages"), sections: num("sections"), assets: num("assets") };
+}
+
+/** null / undefined / "" all mean "absent"; anything else is coerced. */
+function str(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

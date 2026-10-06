@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, ProtocolMismatchError, api, assertProtocol } from "./lib/api";
 import { EXPECTED_PROTOCOL } from "./lib/protocol";
 import {
-  parseExport,
   parseSessionStatus,
   type NotebookList,
+  type RunningExport,
   type SessionStatus,
 } from "./lib/session";
+import { parseChallenge, type Challenge } from "./lib/events-contract";
 import { useEventStream } from "./lib/useEventStream";
 import { Consent } from "./pages/Consent";
 import { Credential } from "./pages/Credential";
@@ -34,6 +35,7 @@ export function App() {
   const [boot, setBoot] = useState<Boot>({ phase: "checking" });
   const [status, setStatus] = useState<SessionStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [challenge, setChallenge] = useState<Challenge | null>(null);
   const [view, setView] = useState<View>("consent");
 
   // --- handshake ------------------------------------------------------------
@@ -71,8 +73,21 @@ export function App() {
   // --- snapshot -------------------------------------------------------------
   const refreshStatus = useCallback(async () => {
     try {
-      const raw = await api.status();
-      setStatus(parseSessionStatus(raw));
+      const parsed = parseSessionStatus(await api.status());
+      if (!parsed.ok) {
+        // Surfaced, not absorbed. The previous parser defaulted every missing
+        // field, so a total mismatch rendered a page that looked entirely normal
+        // while showing no session and no export -- the quietest possible
+        // failure, and one nobody reports.
+        setStatus(null);
+        setStatusError(
+          `This page cannot read the session the service returned (${parsed.problems.join(
+            "; ",
+          )}). That is a version mismatch, not something to retry.`,
+        );
+        return;
+      }
+      setStatus(parsed.value);
       setStatusError(null);
     } catch (err) {
       // A status we cannot read is not the same as no session. Saying "no
@@ -105,14 +120,14 @@ export function App() {
    * rather than a silent empty string.
    */
   const csrfToken = status?.csrfToken ?? null;
-  const missingToken = status?.authenticated === true && csrfToken === null;
+  const missingToken = status?.hasSession === true && csrfToken === null;
 
   // --- live updates ---------------------------------------------------------
   //
   // The stream is opened once a session exists. It carries the notebook list,
   // the export state and the signed-in flag, so polling is not needed and a
   // long export survives a reconnect via the server's ring buffer.
-  const sessionExists = status?.authenticated === true;
+  const sessionExists = status?.hasSession === true;
 
   const onStreamEvent = useCallback(
     ({ event, data }: { event: string; data: unknown }) => {
@@ -122,48 +137,61 @@ export function App() {
         case "notebooks-listed":
           setStatus((prev) =>
             prev
-              ? {
-                  ...prev,
-                  notebooks: parseNotebooks(data),
-                  matched: { ...prev.matched, notebooks: "notebooks" },
-                }
+              ? { ...prev, notebooks: parseNotebooks(data) }
               : prev,
           );
           break;
 
+        case "export-queued":
         case "export-started":
         case "export-progress":
-          setStatus((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  export: parseExport(data) ?? prev.export,
-                }
-              : prev,
-          );
+        case "export-done":
+        case "export-partial":
+        case "export-aborted":
+          // Terminal events included, deliberately. The outcome lives in the
+          // *event name* -- there is no `export-ended` -- and the payload
+          // carries counts rather than a whole export. The snapshot is the
+          // authority for shape, so re-reading it is what makes the card correct
+          // rather than approximately correct.
+          void refreshStatus();
           break;
 
-        case "export-ended":
+        case "login-success":
+          // The credential was accepted. The status read that follows is what
+          // moves the view; nothing is inferred from the event itself.
+          void refreshStatus();
+          break;
+
+        case "login-failed":
+        case "auth-expired":
+          // `expired` and `failed` are rendered identically on purpose. A
+          // Microsoft-side cookie invalidation and a crashed OneNote tab produce
+          // the same observable error, so the client cannot honestly tell them
+          // apart -- and guessing would be worse than saying "sign in again".
           setStatus((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  // The terminal payload carries the outcome. Clearing to
-                  // undefined would discard `failed` and show the chooser
-                  // again as though nothing had gone wrong.
-                  export: parseExport(data) ?? undefined,
-                }
-              : prev,
+            prev ? { ...prev, signedIn: false, authState: "expired" } : prev,
           );
           void refreshStatus();
           break;
 
-        case "signed-in":
-          setStatus((prev) => (prev ? { ...prev, signedIn: true } : prev));
+        case "challenge":
+          // An outstanding MFA prompt. Surfaced rather than dropped: the
+          // alternative is a user staring at a spinner during a sign-in that is
+          // waiting on them, which reads as a hung app.
+          setChallenge(parseChallenge(data));
           break;
 
-        case "session-ended":
-          setStatus(null);
+        case "challenge-expired":
+          setChallenge(null);
+          break;
+
+        case "session-status":
+        case "auth-state":
+        case "snapshot":
+          // These carry a whole snapshot. `refreshStatus` obtains the same
+          // payload from the REST route, so there is one parser rather than two.
+          void refreshStatus();
+          break;
           setView("consent");
           break;
 
@@ -184,8 +212,9 @@ export function App() {
   // `consent` by an erase.
   useEffect(() => {
     if (!status) return;
-    if (!status.authenticated) {
-      setView((v) => (v === "export" ? "export" : v));
+    if (!status.hasSession) {
+      setChallenge(null);
+      setView("consent");
       return;
     }
     if (!status.signedIn) {
@@ -259,6 +288,28 @@ export function App() {
             </p>
           )}
 
+          {/*
+            An outstanding MFA prompt. Previously absent entirely — `challenge` was
+            an event name I had never heard of, so a user waiting on their phone
+            for an approval saw a spinner with no explanation. The expiry comes
+            from this event and not from `auth.state`, which is what the api is
+            explicit about: an auth state has no deadline to count down from.
+          */}
+          {challenge && view !== "credential" && (
+            <section className="notice" role="status" aria-live="polite">
+              <p>
+                <strong>Your account needs another check.</strong>{" "}
+                {challenge.kind
+                  ? `Finish it in the Microsoft sign-in window: ${challenge.kind}.`
+                  : "Finish it in the Microsoft sign-in window."}
+              </p>
+              <p className="fineprint">
+                This page cannot approve it for you, and the request expires on its
+                own. Leave this tab open until it does.
+              </p>
+            </section>
+          )}
+
           {view === "consent" && (
             <Consent
               onStarted={() => {
@@ -311,10 +362,15 @@ export function App() {
                         ? {
                             ...prev,
                             export: {
-                              exportId,
+                              id: exportId,
                               notebook,
                               state: "queued",
-                            },
+                              progress: null,
+                              partialReason: null,
+                              downloadUrl: null,
+                              fileName: null,
+                              artifactPartial: false,
+                            } satisfies RunningExport,
                           }
                         : prev,
                     );
@@ -330,7 +386,7 @@ export function App() {
             />
           )}
 
-          {status?.authenticated && (
+          {status?.hasSession && (
             <footer>
               <button type="button" onClick={() => void onErase()}>
                 Erase this session
@@ -361,14 +417,30 @@ function readStringArray(data: unknown, key: string): string[] {
  * version problem" branch, which is a false alarm on the one screen where a
  * false alarm is most annoying.
  */
+/**
+ * Parse a `notebooks-listed` SSE payload.
+ *
+ * Defaults `state` to `loaded` because the event *is* the completed listing — a
+ * payload with items but no state is a listing, not an idle server. Getting this
+ * backwards would drop the user's notebooks into a wrong branch, which is a false
+ * alarm on the one screen where a false alarm is most annoying.
+ *
+ * An unrecognised state is mapped to `failed` rather than passed through: the
+ * union is closed and transcribed from the api, so a value outside it is a
+ * mismatch, and showing the listing as failed is the honest reading where
+ * showing an empty chooser would not be.
+ */
 function parseNotebooks(data: unknown): NotebookList {
   if (typeof data !== "object" || data === null) {
     return { state: "loaded", items: [] };
   }
   const raw = data as Record<string, unknown>;
+  const state = raw.state;
   return {
-    state: typeof raw.state === "string" ? raw.state : "loaded",
+    state:
+      state === "idle" || state === "listing" || state === "loaded" || state === "failed"
+        ? state
+        : "loaded",
     items: readStringArray(raw, "items"),
-    error: typeof raw.error === "string" ? raw.error : undefined,
   };
 }
