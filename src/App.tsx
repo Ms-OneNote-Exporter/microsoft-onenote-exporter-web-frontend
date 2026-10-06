@@ -90,9 +90,22 @@ export function App() {
       setStatus(parsed.value);
       setStatusError(null);
     } catch (err) {
-      // A status we cannot read is not the same as no session. Saying "no
-      // session" here would invite the user to create a second one and lose
-      // the first.
+      // A 401 is an *answer*, not a failure: the service has told us this visitor
+      // has no session, which is the expected state for anyone who has not
+      // started one. Showing an error for it put a red alert on the landing page
+      // of every first-time visitor, found by loading the real deployed site.
+      //
+      // The reasoning that used to live here — "a status we cannot read is not
+      // the same as no session, so do not claim there is no session" — is
+      // correct for a 5xx and wrong for a 401. A 500 genuinely leaves the
+      // question open, and claiming "no session" there could cost a user their
+      // existing session. Reading it correctly twice in one place is not the
+      // same as reading it once correctly.
+      if (err instanceof ApiError && err.status === 401) {
+        setStatus(null);
+        setStatusError(null);
+        return;
+      }
       setStatusError(
         err instanceof ApiError
           ? `The session state could not be read (${err.status}).`
