@@ -111,6 +111,68 @@ describe("T-F5: the handshake screen", () => {
     expect(document.body.textContent).toMatch(/Backend protocol 3 confirmed/);
   });
 
+  it("treats a 401 on the status route as 'no session', not as an error", async () => {
+    // Found by loading the real deployed site: every first-time visitor saw a red
+    // alert reading "The session state could not be read (401)". A 401 is the
+    // service answering that this visitor has no session, which is the expected
+    // state — not a failure worth an alert.
+    stubVersion(200, { protocol: EXPECTED_PROTOCOL, build: "abc123" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) =>
+        Promise.resolve(
+          url.includes("/api/public/version")
+            ? ({
+                ok: true,
+                status: 200,
+                json: async () => ({ protocol: EXPECTED_PROTOCOL, build: "abc123" }),
+              } as unknown as Response)
+            : ({
+                ok: false,
+                status: 401,
+                json: async () => ({ error: "unauthorised" }),
+              } as unknown as Response),
+        ),
+      ),
+    );
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: /before you sign in/i });
+
+    expect(document.body.textContent).not.toMatch(/could not be read/i);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("still reports a 5xx on the status route, which is a genuine failure", async () => {
+    // The other half of the same distinction: a 500 leaves the question open,
+    // and claiming "no session" there could cost a user the session they have.
+    stubVersion(200, { protocol: EXPECTED_PROTOCOL, build: "abc123" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) =>
+        Promise.resolve(
+          url.includes("/api/public/version")
+            ? ({
+                ok: true,
+                status: 200,
+                json: async () => ({ protocol: EXPECTED_PROTOCOL, build: "abc123" }),
+              } as unknown as Response)
+            : ({
+                ok: false,
+                status: 503,
+                json: async () => ({ error: "unavailable" }),
+              } as unknown as Response),
+        ),
+      ),
+    );
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(document.body.textContent).toMatch(/could not be read \(503\)/);
+  });
+
   it("does not open the event stream before a session exists", async () => {
     // `EventSource` must not be constructed for a visitor with no session: it
     // would open a connection that 404s and, per the note in `events.ts`, would
