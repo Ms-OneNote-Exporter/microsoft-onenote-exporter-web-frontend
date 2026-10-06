@@ -85,6 +85,15 @@ export interface RunningExport {
   state: ExportState;
   progress: ExportProgress | null;
   partialReason: PartialReason | null;
+  /**
+   * `export.error` — short, already safe to display.
+   *
+   * Optional, and absent on older backends. It is null on every non-failed state.
+   * The api is explicit that it must not carry the artifact path, the notebook
+   * name, or anything from the CLI's stderr, so it is rendered as-is rather than
+   * parsed or formatted.
+   */
+  error: string | null;
   /** `artifact.downloadUrl`, supplied by the server. */
   downloadUrl: string | null;
   fileName: string | null;
@@ -194,6 +203,11 @@ export function parseSessionStatus(raw: unknown): Snapshot {
         state: exportState as ExportState,
         progress: parseProgress(exportRaw!.progress),
         partialReason: asPartialReason(exportRaw!.partialReason),
+        // Read opportunistically. Absent on a backend that predates the field,
+        // which is why it is not a reported mismatch: a missing optional field
+        // is not a version problem, and failing the whole parse over it would
+        // break every page for a cosmetic gain.
+        error: str(exportRaw!.error) || null,
         downloadUrl: str(artifact!.downloadUrl) || null,
         fileName: str(artifact!.fileName) || null,
         artifactPartial: artifact!.partial === true,
