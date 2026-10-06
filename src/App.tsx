@@ -8,9 +8,9 @@ import {
   type SessionStatus,
 } from "./lib/session";
 import { useEventStream } from "./lib/useEventStream";
+import { Consent } from "./pages/Consent";
 import { Credential } from "./pages/Credential";
 import { NotebookPicker } from "./pages/NotebookPicker";
-import { SessionCreate } from "./pages/SessionCreate";
 
 type Boot =
   | { phase: "checking" }
@@ -28,7 +28,7 @@ type Boot =
  * The UI does not claim otherwise — `needsGuid` shows the create page, which
  * explains it.
  */
-type View = "consent" | "create" | "credential" | "export";
+type View = "consent" | "credential" | "export";
 
 export function App() {
   const [boot, setBoot] = useState<Boot>({ phase: "checking" });
@@ -243,16 +243,14 @@ export function App() {
             />
           )}
 
-          {view === "create" && (
-            <SessionCreate
-              onCreated={() => {
-                setView("credential");
-                void refreshStatus();
-              }}
-              create={(guid, secret) => api.createSession(guid, secret)}
-            />
-          )}
-
+          {/*
+            There is no separate "create" view. Session creation is rendered by
+            `Consent`, directly beneath the disclosure the user has to read
+            before they are anywhere near a password field. The earlier
+            `view === "create"` branch was unreachable — nothing ever set it —
+            so there was never a path that showed the form without the consent
+            text above it.
+          */}
           {view === "credential" && (
             <Credential
               onSubmitted={() => {
@@ -315,62 +313,6 @@ export function App() {
         </main>
       );
   }
-}
-
-/**
- * The consent block. Asserted against the rendered string rather than against
- * a mechanism, because this is a claim made to the user (T-F7).
- *
- * The wording is load-bearing and was previously understated. `microsoft-webauth`
- * auto-accepts updated Terms of Use and Microsoft consent pages by matching a
- * fixed set of button labels, and **accepting the Services Agreement is a real
- * change to the user's account** — not merely a dismissal of a dialog. Saying
- * only that it "accepts Terms of Use and security prompts" undersells that.
- */
-function Consent({ onStarted }: { onStarted: () => void }) {
-  return (
-    <section className="consent">
-      <h2>Before you sign in</h2>
-      <ul>
-        <li>
-          This is an <strong>unofficial</strong> service. It is not affiliated
-          with or endorsed by Microsoft.
-        </li>
-        <li>
-          You will type your <strong>Microsoft account password</strong> into
-          this page. It is sent over TLS directly to the service and forwarded
-          to an isolated container for that session without being parsed, logged
-          or written to disk. It is gone when you erase your session.
-        </li>
-        <li>
-          Signing in runs an automated browser session, and{" "}
-          <strong>
-            accepting Microsoft consent and updated-terms prompts changes your
-            account
-          </strong>{" "}
-          — it can update the terms you are bound by and your security-info
-          settings. It will not add or remove a sign-in method.
-        </li>
-        <li>
-          If you would rather not hand a Microsoft password to a web service,{" "}
-          <strong>use the local exporter instead</strong>:{" "}
-          <code>microsoft-onenote-exporter</code> produces the same vault on your
-          own machine and no password leaves it.
-        </li>
-      </ul>
-
-      {/*
-        The create form sits below the consent block rather than behind a
-        separate step, because the consent text is a disclosure the user has to
-        read *before* they are anywhere near a password field — and there is no
-        password field here. `onStarted` moves on once the session exists.
-      */}
-      <SessionCreate
-        onCreated={onStarted}
-        create={(guid, secret) => api.createSession(guid, secret)}
-      />
-    </section>
-  );
 }
 
 function readStringArray(data: unknown, key: string): string[] {
