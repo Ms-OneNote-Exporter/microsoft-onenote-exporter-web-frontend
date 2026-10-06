@@ -224,10 +224,23 @@ function ExportProgress({
         <ul className="artifacts">
           {running.artifacts.map((a) => (
             <li key={a.artifactId}>
-              {/* Download goes through Caddy with forward_auth, so the link is
-                  a plain GET and the cookie travels ambiently. No CSRF header
-                  is needed: nothing is mutated by a download. */}
-              <a href={`/files/${encodeURIComponent(a.artifactId)}`} download>
+              {/*
+                A server-supplied `url` wins over the constructed path. Whether
+                `GET /files/:artifactId` lives on the static host (Caddy plus
+                `forward_auth`) or on the API origin was undecided when this was
+                written, and the two produce different hrefs. When the server
+                tells us where the artifact is, this component is not responsible
+                for being right about it.
+
+                `download` is only honoured same-origin, so the fallback keeps
+                it and lets the server's `Content-Disposition` name the file
+                when the href turns out to be cross-origin. Nothing is lost by
+                setting it either way.
+              */}
+              <a
+                href={a.url ?? `/files/${encodeURIComponent(a.artifactId)}`}
+                download={a.name}
+              >
                 {a.name}
               </a>
               {typeof a.bytes === "number" && (

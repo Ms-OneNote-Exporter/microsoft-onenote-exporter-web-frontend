@@ -3,15 +3,27 @@
  *
  * These types describe PLAN-v2 §7.5's `/api/session/status` snapshot and the
  * SSE events that keep it current. They are **hand-written literals** for the
- * same reason `protocol.ts` is: the two repos deploy independently, so the
- * shape is a contract we both assert rather than a package we both import.
+ * same reason `protocol.ts` is: the two repos deploy independently, so the shape
+ * is a contract we both assert rather than a package we both import.
  *
- * What is deliberately *not* asserted here is the `state` union. zeus has been
- * asked what the non-`loaded` values are, and until that is answered every
- * consumer treats an unrecognised state as `unknown` rather than assuming it
- * is idle — see `notebookStatus()` below. Guessing a closed union wrong would
- * make the export page render an empty chooser instead of a progress state,
- * which is the kind of failure that looks like a working page.
+ * ## Why the parsers are alias-tolerant
+ *
+ * The field names below were a guess. They are still a guess — the contract
+ * discussion with Component B has not settled them — so rather than hard-code
+ * one spelling and be silently wrong if the other side picked a different one,
+ * each field is resolved through a list of accepted aliases.
+ *
+ * The cost is real and worth stating: a typo in the *server* now produces a
+ * "signed in as false" page instead of a loud parse failure. That is why
+ * `parseSessionStatus` also returns `matched` — the alias table records which key
+ * actually satisfied each field. When the two implementations agree, every entry
+ * is either the canonical name or an alias that is never used, and the aliases
+ * can be deleted in a follow-up with a test proving the canonical name is the
+ * one in use. Until then, `matched` is the diagnostic and guessing wrong costs a
+ * broken page rather than a silent data-corruption bug.
+ *
+ * The alternative was opening the pages against names nobody had agreed to and
+ * discovering the mismatch during an export.
  */
 
 /** Progress of the notebook listing, which runs a CLI in the runner. */
@@ -41,6 +53,15 @@ export interface SessionStatus {
   notebooks: NotebookList;
   /** The running export, if any. Drives refresh-restore during an export. */
   export?: RunningExport | undefined;
+  /** Which alias satisfied each field. Diagnostic; see the note above. */
+  matched: MatchedAliases;
+}
+
+export interface MatchedAliases {
+  authenticated?: string | undefined;
+  signedIn?: string | undefined;
+  notebooks?: string | undefined;
+  export?: string | undefined;
 }
 
 export type ExportState =
@@ -66,15 +87,49 @@ export interface Artifact {
   artifactId: string;
   name: string;
   bytes?: number | undefined;
+  /**
+   * An absolute or origin-relative URL supplied by the server.
+   *
+   * Preferred over constructing `/files/<id>` here, because whether
+   * `GET /files/:artifactId` is served by the static host (Caddy plus
+   * `forward_auth`) or by the API origin was still undecided when this was
+   * written, and the two produce a different href. When the server supplies the
+   * URL, this component never has to be right about it.
+   */
+  url?: string | undefined;
+}
+
+/**
+ * Canonical name first, then accepted aliases. First match wins.
+ *
+ * Keeping the canonical spelling at index 0 means that once the server settles
+ * on one name, the `matched` map will show it and the rest can be deleted.
+ */
+const ALIASES = {
+  authenticated: ["authenticated", "session", "hasSession", "session_exists"],
+  signedIn: ["signedIn", "signed_in", "isSignedIn", "credential_accepted"],
+  notebooks: ["notebooks", "notebookList", "notebook_list"],
+  export: ["export", "runningExport", "running_export", "currentExport", "job"],
+} as const satisfies Record<keyof MatchedAliases, readonly string[]>;
+
+function readAlias(
+  body: Record<string, unknown>,
+  field: keyof typeof ALIASES,
+): { key: string | undefined; value: unknown } {
+  for (const key of ALIASES[field]) {
+    if (key in body) return { key, value: body[key] };
+  }
+  return { key: undefined, value: undefined };
 }
 
 /**
  * Normalise the server's notebook state without assuming a closed union.
  *
- * The scaffold's own type was `unknown`, and an unrecognised value rendered as
- * an empty chooser is indistinguishable from "loaded, zero notebooks". Mapping
- * to `unknown` keeps those two cases visibly different in the UI, which is the
- * difference between a user reporting a bug and a user reporting nothing.
+ * The union was never agreed, and treating an unknown value as `idle` renders
+ * "No notebooks listed yet" — indistinguishable from a working empty account,
+ * which is the kind of failure nobody reports. Mapping to `unknown` keeps an
+ * empty listing and an unrecognised state visibly different, and names the raw
+ * value so a user can report something specific.
  */
 export function notebookStatus(raw: unknown): NotebookStatusView {
   if (!isRecord(raw)) {
@@ -83,7 +138,7 @@ export function notebookStatus(raw: unknown): NotebookStatusView {
 
   const state = typeof raw.state === "string" ? raw.state : "";
   const items = Array.isArray(raw.items)
-    ? raw.items.filter((n): n is string => typeof n === "string")
+    ? raw.items.filter((n: unknown): n is string => typeof n === "string")
     : [];
 
   switch (state) {
@@ -114,38 +169,88 @@ export type NotebookStatusView =
 /**
  * Parse `/api/session/status` into a `SessionStatus`.
  *
- * Tolerant by construction: every field is checked, and a malformed body
- * becomes a status that reports nothing rather than a throw. A backend that is
+ * Tolerant by construction: every field is checked, and a malformed body becomes
+ * a status that reports nothing rather than a throw. A backend that is
  * mid-deploy or misconfigured should produce a page that says "cannot read the
  * session", not a blank screen.
  */
 export function parseSessionStatus(raw: unknown): SessionStatus {
   const body = isRecord(raw) ? raw : {};
-  // Narrowed separately rather than with `body.notebooks?.state`, because an
-  // unknown value is not an object we may read arbitrary keys from.
-  const notebooks = isRecord(body.notebooks) ? body.notebooks : {};
-  const exportRaw = body.export;
+  const matched: MatchedAliases = {};
+
+  const auth = readAlias(body, "authenticated");
+  matched.authenticated = auth.key;
+
+  const signedIn = readAlias(body, "signedIn");
+  matched.signedIn = signedIn.key;
+
+  const notebooksRaw = readAlias(body, "notebooks");
+  matched.notebooks = notebooksRaw.key;
+
+  const exportRaw = readAlias(body, "export");
+  matched.export = exportRaw.key;
+
+  const notebooks = isRecord(notebooksRaw.value) ? notebooksRaw.value : {};
   const items = Array.isArray(notebooks.items) ? notebooks.items : [];
 
   return {
-    authenticated: body.authenticated === true,
-    signedIn: body.signedIn === true,
+    authenticated: truthy(auth.value),
+    signedIn: truthy(signedIn.value),
     notebooks: {
       state: typeof notebooks.state === "string" ? notebooks.state : "",
       items: items.filter((n: unknown): n is string => typeof n === "string"),
-      error: typeof notebooks.error === "string" ? notebooks.error : undefined,
+      error:
+        typeof notebooks.error === "string" ? notebooks.error : undefined,
     },
-    export: isRunningExport(exportRaw) ? exportRaw : undefined,
+    export: parseExport(exportRaw.value) ?? undefined,
+    matched,
   };
 }
 
-function isRunningExport(value: unknown): value is RunningExport {
-  return (
-    isRecord(value) &&
-    typeof value.exportId === "string" &&
-    typeof value.notebook === "string" &&
-    typeof value.state === "string"
-  );
+/**
+ * Only a real `true` counts as true.
+ *
+ * Not truthiness: a backend that serialises `"true"` or `1` would otherwise be
+ * read as signed in, and the credential page is the one screen where being wrong
+ * in that direction sends a user to type their password again.
+ */
+function truthy(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (isRecord(value)) return true;
+  return false;
+}
+
+/** Parse an export from a status snapshot or an SSE payload. Shared. */
+export function parseExport(raw: unknown): RunningExport | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.exportId !== "string") return null;
+
+  const notebook = typeof raw.notebook === "string" ? raw.notebook : "";
+
+  return {
+    exportId: raw.exportId,
+    notebook,
+    state: (typeof raw.state === "string" ? raw.state : "running") as ExportState,
+    progress: typeof raw.progress === "string" ? raw.progress : undefined,
+    error: typeof raw.error === "string" ? raw.error : undefined,
+    artifacts: parseArtifacts(raw.artifacts),
+  };
+}
+
+function parseArtifacts(value: unknown): Artifact[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: Artifact[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    if (typeof item.artifactId !== "string") continue;
+    out.push({
+      artifactId: item.artifactId,
+      name: typeof item.name === "string" ? item.name : item.artifactId,
+      bytes: typeof item.bytes === "number" ? item.bytes : undefined,
+      url: typeof item.url === "string" ? item.url : undefined,
+    });
+  }
+  return out;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

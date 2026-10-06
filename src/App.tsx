@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, ProtocolMismatchError, api, assertProtocol } from "./lib/api";
 import { EXPECTED_PROTOCOL } from "./lib/protocol";
 import {
+  parseExport,
   parseSessionStatus,
-  type RunningExport,
+  type NotebookList,
   type SessionStatus,
 } from "./lib/session";
 import { useEventStream } from "./lib/useEventStream";
@@ -107,10 +108,8 @@ export function App() {
             prev
               ? {
                   ...prev,
-                  notebooks: {
-                    state: readString(data, "state", "loaded"),
-                    items: readStringArray(data, "items"),
-                  },
+                  notebooks: parseNotebooks(data),
+                  matched: { ...prev.matched, notebooks: "notebooks" },
                 }
               : prev,
           );
@@ -129,8 +128,17 @@ export function App() {
           break;
 
         case "export-ended":
-          setStatus((prev) => (prev ? { ...prev, export: undefined } : prev));
-          // The final state matters, so re-read rather than clearing.
+          setStatus((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  // The terminal payload carries the outcome. Clearing to
+                  // undefined would discard `failed` and show the chooser
+                  // again as though nothing had gone wrong.
+                  export: parseExport(data) ?? undefined,
+                }
+              : prev,
+          );
           void refreshStatus();
           break;
 
@@ -365,45 +373,30 @@ function Consent({ onStarted }: { onStarted: () => void }) {
   );
 }
 
-function readString(data: unknown, key: string, fallback: string): string {
-  if (typeof data !== "object" || data === null) return fallback;
-  const value = (data as Record<string, unknown>)[key];
-  return typeof value === "string" ? value : fallback;
-}
-
 function readStringArray(data: unknown, key: string): string[] {
   if (typeof data !== "object" || data === null) return [];
   const value = (data as Record<string, unknown>)[key];
   if (!Array.isArray(value)) return [];
-  return value.filter((n): n is string => typeof n === "string");
+  return value.filter((n: unknown): n is string => typeof n === "string");
 }
 
-function parseExport(data: unknown): RunningExport | null {
-  if (typeof data !== "object" || data === null) return null;
-  const raw = data as Record<string, unknown>;
-  if (typeof raw.exportId !== "string" || typeof raw.notebook !== "string") {
-    return null;
+/**
+ * Parse a `notebooks-listed` SSE payload.
+ *
+ * Defaults `state` to `loaded` because the event *is* the completed listing —
+ * a payload with items but no state is a listing, not an idle server. Getting
+ * this backwards would drop the user's notebooks into the "unrecognised state,
+ * version problem" branch, which is a false alarm on the one screen where a
+ * false alarm is most annoying.
+ */
+function parseNotebooks(data: unknown): NotebookList {
+  if (typeof data !== "object" || data === null) {
+    return { state: "loaded", items: [] };
   }
+  const raw = data as Record<string, unknown>;
   return {
-    exportId: raw.exportId,
-    notebook: raw.notebook,
-    state: (typeof raw.state === "string" ? raw.state : "running") as RunningExport["state"],
-    progress: typeof raw.progress === "string" ? raw.progress : undefined,
+    state: typeof raw.state === "string" ? raw.state : "loaded",
+    items: readStringArray(raw, "items"),
     error: typeof raw.error === "string" ? raw.error : undefined,
-    artifacts: Array.isArray(raw.artifacts)
-      ? raw.artifacts
-          .filter(
-            (a): a is { artifactId: string; name: string; bytes?: number } =>
-              typeof a === "object" &&
-              a !== null &&
-              typeof (a as Record<string, unknown>).artifactId === "string" &&
-              typeof (a as Record<string, unknown>).name === "string",
-          )
-          .map((a) => ({
-            artifactId: a.artifactId,
-            name: a.name,
-            bytes: typeof a.bytes === "number" ? a.bytes : undefined,
-          }))
-      : undefined,
   };
 }
