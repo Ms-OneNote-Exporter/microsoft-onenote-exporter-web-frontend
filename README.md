@@ -262,6 +262,24 @@ clickjacking protection is the one control that depends on the host cooperating.
 
 ## Local development
 
+### Changing the API origin
+
+**One value, one place, one rebuild.** The origin lives in the `VITE_API_ORIGIN` environment variable and nowhere else — `vite.config.ts` is the only file that reads it, and both the request target (`__API_ORIGIN__`) and the `connect-src` in the emitted policy derive from that single read. They cannot drift apart, because there is nothing to drift between.
+
+**Procedure (hPanel):** Environment variables → edit `VITE_API_ORIGIN` → save. The platform rebuilds and redeploys. No code change, and no second file to edit.
+
+**Procedure (local):** edit the single line in `.env`, then `npm run build`.
+
+The value must be an exact origin: scheme, host, optional port, **no path, no trailing slash**. The build refuses anything else rather than shipping a `connect-src` that does not parse — a policy that fails to parse restricts nothing while the page still loads, which is the worst shape of failure for this particular header.
+
+#### Why an environment variable and not a committed config file
+
+The distinction that matters is **build-time versus runtime**, and it is load-bearing.
+
+A committed `config.json` read *at build time* would be equivalent and harmless. A config file or endpoint read *at runtime* is the hole this design closes: whichever host serves that file could then choose where the credential is sent, which is exactly the attack the build-time constant exists to prevent. It is why there is deliberately no user-supplied base URL anywhere in `src/`.
+
+The practical consequence: changing the origin needs a **rebuild**, not a restart. That is the trade, and it is cheap to make once.
+
 ### Node version
 
 `engines.node` is `>=22.12.0`, and the `.0` matters.
