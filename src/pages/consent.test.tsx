@@ -128,13 +128,19 @@ describe("T-F7: the consent copy, as rendered", () => {
     expect(consentText()).toMatch(/not affiliated with or endorsed by microsoft/i);
   });
 
-  it("states that a Microsoft account password is typed into the page", () => {
+  it("states that a Microsoft account AND password are typed into the page", () => {
     // The single most important sentence on the page. If it goes, the service
     // collects a credential without having said so.
-    expect(consentText()).toMatch(/microsoft account password/i);
+    //
+    // **Both halves, deliberately.** The form asks for an account as well as a
+    // password, and a disclosure naming only the password is inaccurate about
+    // what this service collects — which is the failure this assertion exists to
+    // catch, and it is exactly what the copy said before the account field
+    // existed.
+    expect(consentText()).toMatch(/microsoft account and password/i);
   });
 
-  it("states that the password is not parsed, logged or written to disk", () => {
+  it("states that neither is parsed, logged or written to disk", () => {
     // The three containment claims. Overstating them is as much a disclosure
     // failure as understating them.
     expect(consentText()).toMatch(/without being parsed, logged or written to disk/i);
@@ -154,7 +160,7 @@ describe("T-F7: the consent copy, as rendered", () => {
     expect(consentText()).toMatch(/no password leaves it/i);
   });
 
-  it("says the password is gone when the session is erased", () => {
+  it("says they are gone when the session is erased", () => {
     expect(consentText()).toMatch(/gone when you erase your session/i);
   });
 

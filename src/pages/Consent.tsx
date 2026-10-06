@@ -26,10 +26,10 @@ export function Consent({ onStarted }: { onStarted: () => void }) {
           with or endorsed by Microsoft.
         </li>
         <li>
-          You will type your <strong>Microsoft account password</strong> into
-          this page. It is sent over TLS directly to the service and forwarded
+          You will type your <strong>Microsoft account and password</strong> into
+          this page. They are sent over TLS directly to the service and forwarded
           to an isolated container for that session without being parsed, logged
-          or written to disk. It is gone when you erase your session.
+          or written to disk. They are gone when you erase your session.
         </li>
         <li>
           Signing in runs an automated browser session, and{" "}

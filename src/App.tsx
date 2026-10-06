@@ -349,8 +349,8 @@ export function App() {
                 setView("export");
                 void refreshStatus();
               }}
-              submit={(password) =>
-                api.submitCredential(password, csrfToken ?? "")
+              submit={(account, password) =>
+                api.submitCredential(account, password, csrfToken ?? "")
               }
             />
           )}

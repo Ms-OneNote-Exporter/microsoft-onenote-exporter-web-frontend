@@ -25,6 +25,8 @@
  * a character check passes for one that was re-escaped and then unescaped.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+
+const ACCOUNT = "someone@example.com";
 import { api } from "./api";
 
 /**
@@ -73,7 +75,7 @@ const CASES: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /** The body the client actually transmitted, as bytes. */
-async function transmit(password: string): Promise<Uint8Array> {
+async function transmit(password: string, account = "someone@example.com"): Promise<Uint8Array> {
   const encoder = new TextEncoder();
   let captured: BodyInit | null | undefined;
 
@@ -89,7 +91,7 @@ async function transmit(password: string): Promise<Uint8Array> {
     }),
   );
 
-  await api.submitCredential(password, "csrf-token-value");
+  await api.submitCredential(account, password, "csrf-token-value");
 
   if (typeof captured === "string") return encoder.encode(captured);
   if (captured instanceof Uint8Array) return captured;
@@ -117,6 +119,57 @@ describe("the credential is transmitted byte-for-byte", () => {
   }
 });
 
+describe("the account travels in a header, not in the body", () => {
+  async function headersFor(account: string): Promise<Record<string, string>> {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({}),
+    } as unknown as Response);
+    vi.stubGlobal("fetch", fetchSpy);
+    await api.submitCredential(account, "pw", "csrf-token-value");
+    return fetchSpy.mock.calls[0]![1].headers as Record<string, string>;
+  }
+
+  it("sends it as X-Microsoft-Account", async () => {
+    const headers = await headersFor("someone@example.com");
+    expect(headers["X-Microsoft-Account"]).toBe("someone@example.com");
+  });
+
+  it("keeps the account byte-identical, trailing spaces and all", async () => {
+    // The backend passes it through unmodified, and a trim anywhere would be
+    // invisible at every layer above while breaking the login at the far end.
+    const account = "  spaced@example.com  ";
+    const headers = await headersFor(account);
+    expect(headers["X-Microsoft-Account"]).toBe(account);
+  });
+
+  it("does not validate the account as an email address", async () => {
+    // Microsoft accepts a username or a phone number at that field. Rejecting
+    // one here would be a dead end with no explanation offered.
+    for (const account of ["jane.doe", "+15551234567", "someone@localhost"]) {
+      const headers = await headersFor(account);
+      expect(headers["X-Microsoft-Account"]).toBe(account);
+    }
+  });
+
+  it("adds nothing to the credential body", async () => {
+    // The load-bearing assertion of this whole change. If an account line ever
+    // appears in the body, the delimiter idea has crept back and all 20
+    // byte-equality cases above stop meaning what they say.
+    const sent = await transmit("hunter2");
+    expect(new TextDecoder().decode(sent)).toBe("hunter2");
+    expect(sent.length).toBe("hunter2".length);
+  });
+
+  it("keeps the body byte-identical whatever the account is", async () => {
+    for (const account of ["", " ", "someone@example.com", "x".repeat(320)]) {
+      const sent = await transmit("hunter2", account);
+      expect(sent).toEqual(new TextEncoder().encode("hunter2"));
+    }
+  });
+});
+
 describe("the wire shape the forwarder depends on", () => {
   it("declares text/plain, so nothing decides the body is JSON", async () => {
     const fetchSpy = vi.fn().mockResolvedValue({
@@ -126,7 +179,7 @@ describe("the wire shape the forwarder depends on", () => {
     } as unknown as Response);
     vi.stubGlobal("fetch", fetchSpy);
 
-    await api.submitCredential("hunter2", "csrf-token-value");
+    await api.submitCredential(ACCOUNT, "hunter2", "csrf-token-value");
 
     const [, init] = fetchSpy.mock.calls[0]!;
     // Declaring JSON on a body the server refuses to parse would be both a
@@ -147,7 +200,7 @@ describe("the wire shape the forwarder depends on", () => {
     } as unknown as Response);
     vi.stubGlobal("fetch", fetchSpy);
 
-    await api.submitCredential("hunter2", "csrf-token-value");
+    await api.submitCredential(ACCOUNT, "hunter2", "csrf-token-value");
 
     const [, init] = fetchSpy.mock.calls[0]!;
     expect((init.headers as Record<string, string>)["X-CSRF-Token"]).toBe(
