@@ -319,20 +319,66 @@ snapshot. The consent copy is finished, because it is a claim made to the user
 and is asserted against the rendered text (`T-F7`) rather than against a
 mechanism.
 
-Two items from §12 step 12 remain:
+**Deployed and verified against the live backend** at
+`https://microsoft-onenote-exporter.phttp.com`, against
+`https://one-backend.phttp.com` over real TLS. Verified in a browser, not a stub:
 
-- **Hosting setup is step 13** and is not done. In particular `/files/` routing
-  on the static host is unconfirmed — see Outstanding questions.
-- **No end-to-end run against a real backend.** Every test in this repository
-  runs against stubs. There is no equivalent here to the fake-Docker-daemon smoke
-  test on the backend side, which is a real gap: a mocked `fetch` cannot tell you
-  that a route is missing, that a cookie is not being set, or that CORS refuses
-  a preflight. The first run against a live backend should be expected to find
+- version handshake (`protocol 3`), page render, consent and credential forms
+- `POST /api/session` → 201; `GET /api/session/status` cross-origin
+- the real status snapshot parses with zero problems (committed as a fixture)
+- **SSE attaches** — `withCredentials: true` carrying the cookie across origins
+- foreign origin and `Origin: null` receive no `Access-Control-Allow-Origin`
+- unknown path → 401, no path oracle
+- 403 without `X-CSRF-Token`, 409 with it — the CSRF fix proven end to end
+- the credential route accepts `X-Microsoft-Account`, and returns 400 without it
+
+### What is not done
+
+- **The runner is not built.** `@msout/*` is unpublished, so
+  `POST /api/session/credential`, `/notebooks`, `/export` and abort all answer
+  **501 or 409** on the backend, honestly labelled. The flow reaches the password
+  field and cannot complete past it. That is the only remaining critical path,
+  and none of it is in this repository.
+- **GHCR publishing is unwired** on the backend, so the image tag cannot yet be
+  tied to a published digest.
+- **No scheduled attestation job.** §7.1 asks for one on a *schedule*, because a
+  tampered bundle needs no code change. `dist/ASSETS.sha256` is emitted and
+  verified by hand against the live site, but nothing re-checks it. That is the
+  one detection control here that is asserted rather than automated.
+- **`/files/` routing on the static host is unconfirmed** — it 404s today.
+  Artifact downloads now use `artifact.downloadUrl` from the snapshot, so this
+  file no longer constructs a path, but the route itself is the backend's Caddy
+  to serve. See Outstanding questions.
+
+### A note on what the tests here can and cannot see
+
+Every test in this repository runs against stubs, and that limitation is real
+rather than theoretical. A mocked `fetch` cannot tell you that a route is
+missing, that a cookie is not being set, or that CORS refuses a preflight —
+three of the four bugs found by cross-component work were of exactly that shape,
+and none was visible from either test suite. **The live run in the list above is
+the only thing that has ever verified them.**
+
+### The pattern worth carrying to the next thing built here
+
+> An assertion about the handler is not an assertion about the transport.
+
+Four instances across two repositories, each invisible to a green suite:
+
+1. `node:sqlite` behind a flag — reached only by what actually runs
+2. SSE `Access-Control-Allow-Origin` — asserted *absent* when it should be
+   absent, never *present* when it should be
+3. Credential bytes — asserted that *events* happened, never that *bytes* arrived
+4. This repository's own first credential bug — every test used a simple
+   password, so a password containing a quote was corrupted silently
+
+The last one is the one to remember here: **"the tests pass" was written about a
+client that turned `hunter2` into `"hunter2"` on the wire.**
   something.
 
 ### Tests
 
-`npm test` — 80 tests. Those cited by ID elsewhere in this file are real and
+`npm test` — 163 tests. Those cited by ID elsewhere in this file are real and
 named in the test sources:
 
 | ID | Asserts | File |
@@ -345,9 +391,18 @@ named in the test sources:
 | `T-F7` | the consent copy, against rendered text | `src/pages/consent.test.tsx` |
 | `T-F5` | the four boot states, incl. the version-mismatch screen | `src/App.test.tsx` |
 
-Two bugs were found by writing these: the credential route was JSON-encoding the
-password (`"hunter2"` on the wire, quotes included), and `abort()` was
-interpolating an unencoded export id. Both are fixed in
+Beyond the ID'd assertions, three files exist because of specific bugs rather
+than for coverage:
+
+| File | Why it exists |
+|---|---|
+| `src/lib/credential-wire.test.ts` | the client half of the credential guarantee, with a case list kept in step with the backend's by diffing rather than by assertion. Found: the body was JSON-encoding the password, so `hunter2` became `"hunter2"` |
+| `src/lib/contract-fixture.test.ts` | the **real** status snapshot, captured from the live backend. Every other fixture was a transcription of the api's source, which is how three interface guesses got through |
+| `src/lib/events-contract.test.ts` | the backend's `EVENT_TYPES`, asserted in full and asserting that three previously-invented names are *absent*. Found: `export-ended` does not exist, so a finished export never stopped its progress card |
+
+Two bugs were found by writing the ID'd tests: the credential route was
+JSON-encoding the password, and `abort()` was interpolating an unencoded export
+id. Both fixed in
 [`68089f5`](https://github.com/Ms-OneNote-Exporter/microsoft-onenote-exporter-web-frontend/commit/68089f5).
 
 ## Licence
