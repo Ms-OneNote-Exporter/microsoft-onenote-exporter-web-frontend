@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { Plugin } from "vite";
+import { buildCsp, cspMetaTag, htaccess } from "./csp";
 
 /** `<script>` with no `src` is inline. Anything with a src is `'self'`. */
 const INLINE_SCRIPT = /<script(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script>/gi;
@@ -66,9 +67,11 @@ function emittedBytes(
   return Buffer.from(output.code ?? "", "utf8");
 }
 
-export function assetAttestation(): Plugin {
+export function assetAttestation(apiOrigin: string): Plugin {
   let outDir = "dist";
   let root = process.cwd();
+  /** Collected in writeBundle, consumed by transformIndexHtml. */
+  const inlineHashes = new Set<string>();
 
   return {
     name: "msout:asset-attestation",
@@ -77,6 +80,32 @@ export function assetAttestation(): Plugin {
     configResolved(config) {
       outDir = config.build.outDir;
       root = config.root;
+    },
+
+    /**
+     * Inject the policy into the served HTML.
+     *
+     * This is the half that does not depend on the host. `.htaccess` is the
+     * better mechanism — it covers `frame-ancestors` — but it needs
+     * `mod_headers`, and whether a hosting platform has it is something to
+     * check on the host rather than assume in a comment. A meta tag is honoured
+     * with no server cooperation, so it is the floor.
+     *
+     * Injected at the *top* of `<head>`, before the module script, so the policy
+     * is in force before anything on the page executes.
+     */
+    transformIndexHtml: {
+      order: "pre",
+      handler(html) {
+        const policy = buildCsp({
+          apiOrigin,
+          hashes: [...inlineHashes],
+          // frame-ancestors is discarded by the HTML parser in a meta tag and
+          // only produces a console warning, so it is left to the header.
+          header: false,
+        });
+        return html.replace(/<head([^>]*)>/i, `<head$1>\n    ${cspMetaTag(policy)}`);
+      },
     },
 
     async writeBundle(_options, bundle) {
@@ -121,9 +150,26 @@ export function assetAttestation(): Plugin {
         }
       }
 
-      // Write after the bundle so these two files are not themselves digested.
+      // The header variant carries `frame-ancestors`, which the meta tag cannot.
+      const headerCsp = buildCsp({
+        apiOrigin,
+        hashes: [...hashes],
+        header: true,
+      });
+
+      // Write after the bundle so these files are not themselves digested.
       const { writeFile, mkdir } = await import("node:fs/promises");
       await mkdir(outRoot, { recursive: true });
+
+      // `.htaccess`, carrying the same policy as a response header plus the
+      // non-CSP security headers.
+      //
+      // Written here rather than committed to the repository because
+      // `connect-src` has to name the API origin this particular bundle was
+      // built against. A committed `.htaccess` would be a second copy of a
+      // security-relevant value that nothing keeps in step with the bundle —
+      // the exact drift that would silently unbind the password route.
+      await writeFile(path.join(outRoot, ".htaccess"), htaccess(headerCsp), "utf8");
       await writeFile(
         path.join(outRoot, "ASSETS.sha256"),
         digests.join("\n") + (digests.length ? "\n" : ""),
@@ -143,28 +189,10 @@ export function assetAttestation(): Plugin {
 }
 
 /**
- * The exact policy §1.5 requires, with the built hashes merged in.
- *
- * Exported so the header config and the CI assertion read from one place
- * rather than three drifting copies. `connect-src` is the load-bearing
- * directive: it is what makes a static host safe to type a password into.
- * Without it, an attacker who can inject a script here exfiltrates the
- * credential to any host.
+ * The policy itself lives in `vite/csp.ts`, along with the origin validation
+ * and the `.htaccess` rendering. It is exported from there rather than from this
+ * file so the header, the meta tag and the tests all read one definition.
  */
-export function buildCsp(apiOrigin: string, hashes: string[]): string {
-  const scriptSrc = ["'self'", ...hashes].join(" ");
-  return [
-    "default-src 'self'",
-    `script-src ${scriptSrc}`,
-    "style-src 'self'",
-    "img-src 'self' data: blob:",
-    `connect-src 'self' ${apiOrigin}`,
-    "form-action 'none'",
-    "object-src 'none'",
-    "base-uri 'none'",
-    "frame-ancestors 'none'",
-  ].join("; ");
-}
 
 /** Reads back what a previous build emitted. Used by the CI header assertion. */
 export async function readAttestation(outDir = "dist") {
