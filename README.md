@@ -220,7 +220,7 @@ must be verified rather than assumed). That process still must never proxy
 |---|---|---|
 | Framework preset | `Vite` | — |
 | Branch | `main` | — |
-| Node version | `22.x` | `engines.node >= 22`; vitest 5 requires it |
+| Node version | `22.x` | must resolve to **22.12.0 or later** — vitest 5's floor. hPanel's `22.x` resolves to current 22.x, which is fine. |
 | Root directory | `./` | **`vite.config.ts` and `package.json` are at the top level.** Picking `src` or `vite` breaks the build. |
 | Build command | `npm run build` | runs `tsc -b && vite build`, so a type error fails the build |
 | Package manager | `npm` | matches `package-lock.json` |
@@ -261,6 +261,23 @@ path — `frame-ancestors` reaches the browser only through the header, so
 clickjacking protection is the one control that depends on the host cooperating.
 
 ## Local development
+
+### Node version
+
+`engines.node` is `>=22.12.0`, and the `.0` matters.
+
+**Not because of the build.** Vite 6 and TypeScript are happy on any 22.x — the
+build works on 22.0. The floor is set by **vitest 5, which requires
+`^22.12.0 || ^24 || >=26`**. So `npm test` would fail on 22.0–22.11 while
+`npm run build` succeeded, which is the worst shape: a declared floor part of the
+project honours and part of it does not.
+
+Found by reading each dependency's own `engines` field rather than trusting the
+range — after the same class of bug appeared in the api repository, where a
+declared `>=22.5` turned out to be a floor that could not load its own database
+driver, and which 463 passing tests never caught because every test ran on the
+developer's current Node. **A test suite can only verify a version claim by
+running on the version claimed.**
 
 ```sh
 cp .env.example .env      # set VITE_API_ORIGIN — the build refuses without it
