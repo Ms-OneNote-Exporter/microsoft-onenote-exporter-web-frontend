@@ -38,7 +38,7 @@ export function openEventStream(handlers: StreamHandlers): () => void {
     if (closed) return;
     handlers.onState?.(retryMs === 1_000 ? "connecting" : "replaying");
 
-    source = new EventSource(`${API_ORIGIN}/api/events`, {
+    source = new EventSource(`${API_ORIGIN}/api/session/events`, {
       // Omitting this is the bug. See the note above.
       withCredentials: true,
     });

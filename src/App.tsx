@@ -1,6 +1,15 @@
-import { useEffect, useState } from "react";
-import { ApiError, ProtocolMismatchError, assertProtocol } from "./lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { ApiError, ProtocolMismatchError, api, assertProtocol } from "./lib/api";
 import { EXPECTED_PROTOCOL } from "./lib/protocol";
+import {
+  parseSessionStatus,
+  type RunningExport,
+  type SessionStatus,
+} from "./lib/session";
+import { useEventStream } from "./lib/useEventStream";
+import { Credential } from "./pages/Credential";
+import { NotebookPicker } from "./pages/NotebookPicker";
+import { SessionCreate } from "./pages/SessionCreate";
 
 type Boot =
   | { phase: "checking" }
@@ -9,21 +18,31 @@ type Boot =
   | { phase: "ready"; build: string };
 
 /**
- * Boot shell.
+ * Which page to show. Derived from the session snapshot rather than held as
+ * separate state, so a refresh lands on the right page instead of the landing
+ * screen with a live session behind it.
  *
- * The handshake runs first, before anything else, because a mismatched pair
- * must say so. Without it, this frontend against a v2 backend produces a
- * confusing 404 or a silently missing SSE field, and the natural reaction is to
- * debug the wrong component (PLAN-v3 §7.2). A version-mismatch *screen* is the
- * requirement; a broken page is not acceptable behaviour for a known,
- * expected, self-inflicted condition (T-F5).
- *
- * The pages themselves — landing, session, export flow, refresh restore — are
- * §12 step 12 and are not built yet.
+ * `guid` is the one exception: it is never read back from the server, so after
+ * a refresh it is genuinely unknown and only the cookie can restore the session.
+ * The UI does not claim otherwise — `needsGuid` shows the create page, which
+ * explains it.
  */
+type View = "consent" | "create" | "credential" | "export";
+
 export function App() {
   const [boot, setBoot] = useState<Boot>({ phase: "checking" });
+  const [status, setStatus] = useState<SessionStatus | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [view, setView] = useState<View>("consent");
 
+  // --- handshake ------------------------------------------------------------
+  //
+  // Runs first, before anything else, because a mismatched pair must say so.
+  // Without it, a v3 frontend against a v2 backend produces a confusing 404 or
+  // a silently missing SSE field, and the natural reaction is to debug the
+  // wrong component (PLAN-v3 §7.2). A version-mismatch *screen* is the
+  // requirement; a broken page is not acceptable behaviour for a known,
+  // expected, self-inflicted condition (T-F5).
   useEffect(() => {
     let cancelled = false;
     assertProtocol(EXPECTED_PROTOCOL)
@@ -45,6 +64,125 @@ export function App() {
       cancelled = true;
     };
   }, []);
+
+  const ready = boot.phase === "ready";
+
+  // --- snapshot -------------------------------------------------------------
+  const refreshStatus = useCallback(async () => {
+    try {
+      const raw = await api.status();
+      setStatus(parseSessionStatus(raw));
+      setStatusError(null);
+    } catch (err) {
+      // A status we cannot read is not the same as no session. Saying "no
+      // session" here would invite the user to create a second one and lose
+      // the first.
+      setStatusError(
+        err instanceof ApiError
+          ? `The session state could not be read (${err.status}).`
+          : "The session state could not be read.",
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    void refreshStatus();
+  }, [ready, refreshStatus]);
+
+  // --- live updates ---------------------------------------------------------
+  //
+  // The stream is opened once a session exists. It carries the notebook list,
+  // the export state and the signed-in flag, so polling is not needed and a
+  // long export survives a reconnect via the server's ring buffer.
+  const sessionExists = status?.authenticated === true;
+
+  const onStreamEvent = useCallback(
+    ({ event, data }: { event: string; data: unknown }) => {
+      switch (event) {
+        // A notebook listing completed. Merging rather than replacing keeps a
+        // concurrent export state intact.
+        case "notebooks-listed":
+          setStatus((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  notebooks: {
+                    state: readString(data, "state", "loaded"),
+                    items: readStringArray(data, "items"),
+                  },
+                }
+              : prev,
+          );
+          break;
+
+        case "export-started":
+        case "export-progress":
+          setStatus((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  export: parseExport(data) ?? prev.export,
+                }
+              : prev,
+          );
+          break;
+
+        case "export-ended":
+          setStatus((prev) => (prev ? { ...prev, export: undefined } : prev));
+          // The final state matters, so re-read rather than clearing.
+          void refreshStatus();
+          break;
+
+        case "signed-in":
+          setStatus((prev) => (prev ? { ...prev, signedIn: true } : prev));
+          break;
+
+        case "session-ended":
+          setStatus(null);
+          setView("consent");
+          break;
+
+        default:
+          // An event we do not model is not a reason to tear anything down.
+          break;
+      }
+    },
+    [refreshStatus],
+  );
+
+  const stream = useEventStream(sessionExists, onStreamEvent);
+
+  // --- view selection -------------------------------------------------------
+  //
+  // Derived rather than stored, so it cannot drift out of step with the
+  // snapshot. `view` is only ever forced to `create` by the user, or back to
+  // `consent` by an erase.
+  useEffect(() => {
+    if (!status) return;
+    if (!status.authenticated) {
+      setView((v) => (v === "export" ? "export" : v));
+      return;
+    }
+    if (!status.signedIn) {
+      setView((v) => (v === "consent" ? "credential" : v));
+      return;
+    }
+    setView("export");
+  }, [status]);
+
+  const onErase = useCallback(async () => {
+    try {
+      await api.erase();
+    } finally {
+      // The local view resets even if the server call failed. Leaving a
+      // credential form on screen after the user asked to erase is the worse
+      // of the two.
+      setStatus(null);
+      setView("consent");
+      await refreshStatus();
+    }
+  }, [refreshStatus]);
 
   switch (boot.phase) {
     case "checking":
@@ -76,10 +214,96 @@ export function App() {
 
     case "ready":
       return (
-        <main className="boot">
-          <h1>OneNote Exporter</h1>
-          <p>Backend protocol {EXPECTED_PROTOCOL} confirmed.</p>
-          <Consent />
+        <main className="shell">
+          <header>
+            <h1>OneNote Exporter</h1>
+            <p className="fineprint">Backend protocol {EXPECTED_PROTOCOL} confirmed.</p>
+          </header>
+
+          {statusError && (
+            <p className="error" role="alert">
+              {statusError}
+            </p>
+          )}
+
+          {view === "consent" && (
+            <Consent
+              onStarted={() => {
+                setView("credential");
+                void refreshStatus();
+              }}
+            />
+          )}
+
+          {view === "create" && (
+            <SessionCreate
+              onCreated={() => {
+                setView("credential");
+                void refreshStatus();
+              }}
+              create={(guid, secret) => api.createSession(guid, secret)}
+            />
+          )}
+
+          {view === "credential" && (
+            <Credential
+              onSubmitted={() => {
+                setView("export");
+                void refreshStatus();
+              }}
+              submit={(password) => api.submitCredential(password)}
+            />
+          )}
+
+          {view === "export" && status && (
+            <NotebookPicker
+              notebooks={status.notebooks}
+              signedIn={status.signedIn}
+              export={status.export}
+              streamState={stream.state}
+              onList={() => {
+                void api.listNotebooks();
+              }}
+              onStart={(notebook) => {
+                void api.startExport(notebook).then(
+                  ({ exportId }) => {
+                    // Optimistic: the stream's export-started event will
+                    // confirm, but showing the card immediately beats leaving
+                    // the button live and risking a second POST.
+                    setStatus((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            export: {
+                              exportId,
+                              notebook,
+                              state: "queued",
+                            },
+                          }
+                        : prev,
+                    );
+                  },
+                  () => {
+                    /* 409 or otherwise: the stream will report the truth. */
+                  },
+                );
+              }}
+              onAbort={(exportId) => {
+                void api.abort(exportId);
+              }}
+            />
+          )}
+
+          {status?.authenticated && (
+            <footer>
+              <button type="button" onClick={() => void onErase()}>
+                Erase this session
+              </button>
+              <p className="fineprint">
+                Removes the stored session and expires the cookie in both places.
+              </p>
+            </footer>
+          )}
         </main>
       );
   }
@@ -95,7 +319,7 @@ export function App() {
  * change to the user's account** — not merely a dismissal of a dialog. Saying
  * only that it "accepts Terms of Use and security prompts" undersells that.
  */
-function Consent() {
+function Consent({ onStarted }: { onStarted: () => void }) {
   return (
     <section className="consent">
       <h2>Before you sign in</h2>
@@ -126,6 +350,60 @@ function Consent() {
           own machine and no password leaves it.
         </li>
       </ul>
+
+      {/*
+        The create form sits below the consent block rather than behind a
+        separate step, because the consent text is a disclosure the user has to
+        read *before* they are anywhere near a password field — and there is no
+        password field here. `onStarted` moves on once the session exists.
+      */}
+      <SessionCreate
+        onCreated={onStarted}
+        create={(guid, secret) => api.createSession(guid, secret)}
+      />
     </section>
   );
+}
+
+function readString(data: unknown, key: string, fallback: string): string {
+  if (typeof data !== "object" || data === null) return fallback;
+  const value = (data as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : fallback;
+}
+
+function readStringArray(data: unknown, key: string): string[] {
+  if (typeof data !== "object" || data === null) return [];
+  const value = (data as Record<string, unknown>)[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((n): n is string => typeof n === "string");
+}
+
+function parseExport(data: unknown): RunningExport | null {
+  if (typeof data !== "object" || data === null) return null;
+  const raw = data as Record<string, unknown>;
+  if (typeof raw.exportId !== "string" || typeof raw.notebook !== "string") {
+    return null;
+  }
+  return {
+    exportId: raw.exportId,
+    notebook: raw.notebook,
+    state: (typeof raw.state === "string" ? raw.state : "running") as RunningExport["state"],
+    progress: typeof raw.progress === "string" ? raw.progress : undefined,
+    error: typeof raw.error === "string" ? raw.error : undefined,
+    artifacts: Array.isArray(raw.artifacts)
+      ? raw.artifacts
+          .filter(
+            (a): a is { artifactId: string; name: string; bytes?: number } =>
+              typeof a === "object" &&
+              a !== null &&
+              typeof (a as Record<string, unknown>).artifactId === "string" &&
+              typeof (a as Record<string, unknown>).name === "string",
+          )
+          .map((a) => ({
+            artifactId: a.artifactId,
+            name: a.name,
+            bytes: typeof a.bytes === "number" ? a.bytes : undefined,
+          }))
+      : undefined,
+  };
 }
