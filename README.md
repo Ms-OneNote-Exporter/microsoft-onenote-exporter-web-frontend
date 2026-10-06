@@ -134,6 +134,25 @@ The frontend listens for `notebooks-listed`, `export-started`,
 events are ignored rather than treated as an error, so a new backend event is
 harmless — but an event the frontend needs under a different name is silent.
 
+### 4. Where does the CSRF token come from?
+
+**Settled: in the response body, not a cookie.**
+
+The token used to be a readable `msout_csrf` cookie the page echoed into a header. That cannot work across origins — `document.cookie` only returns cookies scoped to the page's own origin, and the cookie was set host-only by the API origin — so every mutating request went out with an empty header and was refused with a bare `forbidden`.
+
+Neither side's tests caught it. The backend's assert the token is *set and checked*; these assert the header is *present*. Both were true while the value could never arrive.
+
+It now arrives in a response body, which a foreign origin cannot read — CORS lets a non-allowlisted origin *trigger* a request but not read the response. That is the same property that made the cookie safe, and it is why body delivery is safe here.
+
+Two things the backend has to provide:
+
+- `POST /api/session` returns `{ csrfToken }` in its body.
+- `GET /api/session/status` returns `csrfToken` as well. **This is not optional redundancy:** the token is held in memory, so a page reload would otherwise lose it and every mutating route would refuse. `/api/session/status` is already fetched on every load, so this costs no extra round trip and no new route.
+
+The alternative was `Domain=.phttp.com` on the cookie, which the shared registrable domain would have allowed. Rejected because it widens the token's visibility to every subdomain on `phttp.com` — including a message bus — where returning it in a body removes the readable cookie entirely.
+
+If a session exists but no token arrives, the page says so and withholds the forms rather than submitting requests that would be refused with no explanation.
+
 ### 5. Does the backend ever want a client-side password trim?
 
 No, and it should not. `<input type="password">` runs the HTML value
