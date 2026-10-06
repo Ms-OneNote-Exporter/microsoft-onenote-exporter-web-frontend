@@ -49,6 +49,15 @@ Everything below is emitted by `vite/asset-attestation.ts` on every build:
 |---|---|
 | `dist/ASSETS.sha256` | sorted digest of **every** emitted file, chunks included. §7.1's attestation job compares it against the live deployment — and runs on a **schedule**, not only at deploy time, because a tampered bundle needs no code change. |
 | `dist/CSP-HASHES.txt` | the `'sha256-…'` sources for any inline `<script>`, for merging into `script-src`. |
+| `dist/.htaccess` | §1.5's headers, with `connect-src` naming the API origin this bundle was built against. |
+
+The policy is emitted twice, from the same `VITE_API_ORIGIN` as the bundle: as
+the `.htaccess` header, and as a `<meta http-equiv>` in `index.html`. Both is
+strictly safer than either — a `<meta>` policy needs no server cooperation, so it
+holds even where `mod_headers` is unavailable, and multiple policies are
+enforced as an intersection rather than last-one-wins. It is generated rather
+than committed precisely so that `connect-src` cannot drift from the origin the
+code actually talks to; that drift would silently unbind the password route.
 
 Builds are byte-deterministic, so a diff in the manifest means a real output
 change rather than iteration-order noise.
@@ -173,8 +182,8 @@ check is load-bearing rather than hygiene.
 
 ## Deploying
 
-hPanel: framework `vite`, Node LTS, build script `npm ci && npm run build`,
-output `dist`, **entry file empty** — leaving the entry file empty is what
+hPanel: framework `vite`, Node LTS, build script `npm run build`, output
+`dist`, **entry file empty** — leaving the entry file empty is what
 deploys the build as a static site with no Node server running.
 
 The Node runtime is unusable for anything stateful here: the process is stopped
@@ -186,13 +195,59 @@ file server whose only non-static job is emitting the §1.5 headers, and only if
 must be verified rather than assumed). That process still must never proxy
 `/api/*` — `T-A3`.
 
+### hPanel settings
+
+| Setting | Value | Why |
+|---|---|---|
+| Framework preset | `Vite` | — |
+| Branch | `main` | — |
+| Node version | `22.x` | `engines.node >= 22`; vitest 5 requires it |
+| Root directory | `./` | **`vite.config.ts` and `package.json` are at the top level.** Picking `src` or `vite` breaks the build. |
+| Build command | `npm run build` | runs `tsc -b && vite build`, so a type error fails the build |
+| Package manager | `npm` | matches `package-lock.json` |
+| Output directory | `dist` | matches `build.outDir` |
+| Environment variable | `VITE_API_ORIGIN` | **required** — the build refuses without it |
+| Startup file | *empty* | static site, no Node process |
+
+Changing the API origin is one environment variable and a redeploy. There is
+deliberately no runtime config endpoint and no in-app setting — see "no
+user-supplied base URL" above for why that would be a hole rather than a feature.
+
+### Verify after the first deploy
+
+These are checks against the **served** site. The build is attested locally;
+whether the host honours what it emits is a separate question, and the one that
+decides whether this deployment is contained at all.
+
+1. **Is the CSP actually being sent?**
+   `curl -sI https://<frontend-host>/ | grep -i content-security-policy`
+   - Present → `frame-ancestors` is enforced as well.
+   - Absent → `.htaccess` was ignored and the `<meta>` tag is the only thing
+     holding. Confirm it is in the served HTML
+     (`curl -s https://<frontend-host>/ | grep -o 'Content-Security-Policy'`)
+     before treating the deployment as contained.
+   - **Neither → this is an uncontained Microsoft password input.** Do not let
+     anyone use it.
+2. **`connect-src` names the API origin and nothing else.** A policy containing
+   `*` or a bare scheme is not the policy this build emits.
+3. **No Node process is running.** A long-lived process here can only be
+   accumulating state that dies on the idle timeout.
+4. **`/files/` resolves.** Downloads assume the static host serves this path; a
+   404 here means artifacts are unreachable after a completed export. See
+   Outstanding questions.
+
+`mod_headers` cannot be verified from here, which is why both a header and a
+meta tag are emitted. `vite/csp.ts` documents which directives survive on each
+path — `frame-ancestors` reaches the browser only through the header, so
+clickjacking protection is the one control that depends on the host cooperating.
+
 ## Local development
 
 ```sh
-cp .env.example .env      # set VITE_API_ORIGIN
+cp .env.example .env      # set VITE_API_ORIGIN — the build refuses without it
 npm ci
 npm run dev               # http://localhost:5173, talking to the backend origin
-npm run build             # emits dist/ + the two attestation artefacts
+npm run build             # emits dist/ + .htaccess + the two attestation artefacts
 npm run typecheck
 npm test
 ```

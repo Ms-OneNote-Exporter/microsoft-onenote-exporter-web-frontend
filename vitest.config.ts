@@ -20,7 +20,7 @@ export default defineConfig({
   define: { __API_ORIGIN__: JSON.stringify(API_ORIGIN) },
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.{ts,tsx}"],
+    include: ["src/**/*.test.{ts,tsx}", "vite/**/*.test.ts"],
     // The credential route and the SSE client are both network calls. Tests
     // stub `fetch` and `EventSource` explicitly rather than relying on
     // interception, so a test that forgets to stub fails loudly instead of
