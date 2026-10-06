@@ -151,9 +151,33 @@ export const api = {
   version: () => request<{ protocol: number; build: string }>("/api/public/version"),
 
   /**
-   * The credential route. Body is the raw password, sent as-is and not
-   * JSON-encoded: the server declines to parse it and so do we. No `PUT`, no
-   * `PATCH`, no retry — one submission, one outcome.
+   * Creates the session. `guid` identifies it, `secret` authorises it.
+   *
+   * This is the one route where the body *is* JSON, and it is a different
+   * secret from the credential: the session secret is generated here in the
+   * browser and authorises the session (PLAN-v3 §4). The server stores only
+   * its sha256 and compares with `timingSafeEqual`, because a compromised
+   * Component A could generate a weak one — which is why the API validates the
+   * 43-character shape mechanically instead of trusting this file.
+   *
+   * Neither value ever appears in a URL. The secret is returned in an HttpOnly
+   * cookie, so it does not come back to us either.
+   */
+  createSession: (guid: string, secret: string) =>
+    request<void>("/api/session", {
+      method: "POST",
+      body: { guid, secret },
+    }),
+
+  /**
+   * The credential route: the Microsoft password, sent as bytes and not
+   * parsed on either side. No `PUT`, no `PATCH`, no retry — one submission, one
+   * outcome.
+   *
+   * Deliberately *not* trimmed here. The backend forwards bytes verbatim, so a
+   * trailing space is part of the password; the one value we ever alter is a
+   * paste-introduced newline, and that is decided where the user can see it, in
+   * the credential form.
    */
   submitCredential: (password: string) =>
     request<void>("/api/session/credential", {
@@ -161,6 +185,17 @@ export const api = {
       headers: { "Content-Type": "text/plain" },
       body: password,
     }),
+
+  /** The snapshot behind landing, refresh-restore and the export page. */
+  status: () => request<unknown>("/api/session/status"),
+
+  /**
+   * Starts the notebook listing. A `POST` and not a `GET`: listing runs a CLI
+   * in the runner, and a `GET` that mutates server state is the kind of route
+   * that later gets prefetched or crawled. The result arrives over SSE.
+   */
+  listNotebooks: () =>
+    request<void>("/api/session/notebooks", { method: "POST" }),
 
   startExport: (notebook: string) =>
     request<{ exportId: string }>("/api/export", {
@@ -172,8 +207,6 @@ export const api = {
     request<void>(`/api/export/${encodeURIComponent(exportId)}/abort`, {
       method: "POST",
     }),
-
-  snapshot: () => request<unknown>("/api/session/snapshot"),
 
   /** Invalidates the server row *and* expires the cookie — both, in that call. */
   erase: () => request<void>("/api/session/erase", { method: "POST" }),

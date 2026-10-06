@@ -153,10 +153,10 @@ describe("T-A3: no proxying, no user-supplied base URL", () => {
 
     // Any value a caller might hope to control — a path segment, a query, an
     // absolute URL. None of it should reach the request target.
-    await api.snapshot().catch(() => undefined);
+    await api.status().catch(() => undefined);
 
     const [url] = spy.mock.calls[0]!;
-    expect(url).toBe(`${API_ORIGIN}/api/session/snapshot`);
+    expect(url).toBe(`${API_ORIGIN}/api/session/status`);
     expect(url).not.toMatch(/[?#]/);
   });
 
