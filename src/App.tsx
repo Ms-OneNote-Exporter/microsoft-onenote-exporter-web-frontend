@@ -7,7 +7,7 @@ import {
   type RunningExport,
   type SessionStatus,
 } from "./lib/session";
-import { parseChallenge, type Challenge } from "./lib/events-contract";
+import { isPhoneApproval, parseChallenge, type Challenge } from "./lib/events-contract";
 import { useEventStream } from "./lib/useEventStream";
 import { Consent } from "./pages/Consent";
 import { Credential } from "./pages/Credential";
@@ -307,15 +307,41 @@ export function App() {
             for an approval saw a spinner with no explanation. The expiry comes
             from this event and not from `auth.state`, which is what the api is
             explicit about: an auth state has no deadline to count down from.
+
+            ## The number is the actionable part, and it is shown
+
+            The old copy said "finish it in the Microsoft sign-in window". **There
+            is no such window here.** The login runs headlessly in a container on
+            the server, so nothing renders on this page for the user to switch to.
+            For a push-approval challenge the only thing that helps is the number
+            they match against the one in their Authenticator app.
+
+            `parseChallenge` used to read `{id, kind, expiresAt}` while the api
+            sends `{kind, label, number, expiresAt}`, so the number arrived as
+            nothing and this notice was advice the user could not act on.
           */}
           {challenge && view !== "credential" && (
             <section className="notice" role="status" aria-live="polite">
               <p>
                 <strong>Your account needs another check.</strong>{" "}
-                {challenge.kind
-                  ? `Finish it in the Microsoft sign-in window: ${challenge.kind}.`
-                  : "Finish it in the Microsoft sign-in window."}
+                {isPhoneApproval(challenge) ? (
+                  <>
+                    Approve the prompt in your phone, and check it matches this
+                    number:
+                  </>
+                ) : challenge.label ? (
+                  challenge.label
+                ) : (
+                  "Follow the prompt on your phone to finish signing in."
+                )}
               </p>
+              {isPhoneApproval(challenge) && (
+                // The digits as printed. Rendered verbatim and never reformatted,
+                // because the user is comparing them by eye against their phone.
+                <p className="mfa-number" aria-label="number to match">
+                  {challenge.number}
+                </p>
+              )}
               <p className="fineprint">
                 This page cannot approve it for you, and the request expires on its
                 own. Leave this tab open until it does.

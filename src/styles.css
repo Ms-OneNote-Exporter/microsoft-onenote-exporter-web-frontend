@@ -168,6 +168,25 @@ button[disabled] {
   color: var(--muted);
 }
 
+/*
+  The MFA number to match.
+ *
+  Large, monospaced, and letter-spaced because it is compared **by eye** against a
+  phone screen a few inches away. Proportional type at body size makes 3/8/0 hard
+  to distinguish, and that is the one thing this element must not be.
+*/
+.mfa-number {
+  margin: 0.5rem 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+  /* Never reformat the digits: what the user reads must be what Microsoft printed. */
+  text-transform: none;
+  white-space: nowrap;
+}
+
 .notebooks {
   margin: 1rem 0 0;
   padding: 0;
