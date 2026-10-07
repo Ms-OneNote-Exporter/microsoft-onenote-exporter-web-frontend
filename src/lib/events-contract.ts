@@ -54,15 +54,34 @@ export type EventType = (typeof EVENT_TYPES)[number];
  * on a timer that belongs to a different thing.
  */
 export interface Challenge {
-  /** Server-defined identifier, echoed back on the challenge event. */
-  id: string;
-  /** What the user must do, e.g. approve a push or enter a code. */
+  /** What the user must do, e.g. `phone-approval` or `code`. */
   kind: string;
+  /** The number to match on the phone, or null when there is nothing to read. */
+  number: string | null;
+  /** What the backend observed on screen, in words. Empty when absent. */
+  label: string;
   expiresAt: string | null;
 }
 
 /**
  * Parse a `challenge` payload.
+ *
+ * ## The fields are transcribed from the api, and the first version was wrong
+ *
+ * This used to read `{id, kind, expiresAt}` while the api sends
+ * `{kind, label, number, expiresAt}`. Only `kind` overlapped, so `id` was always
+ * `""` and the number never arrived.
+ *
+ * That number is the whole point of the number-match path. The login runs
+ * headlessly in a container: there is no Microsoft window on this screen for the
+ * user to switch to, so the only way they can match the challenge is by being
+ * shown the number. Dropping it meant a user with push-approval MFA was told to
+ * "finish it in the Microsoft sign-in window" and had no way to do it.
+ *
+ * The shape comes from `publish()` in the api's `runner-adapter-http.ts`, which is
+ * where the runner's own event is translated. It is transcribed, not inferred —
+ * the same rule this file already records for `EVENT_TYPES`, and the failure it
+ * records there was this file inventing `export-ended` and `signed-in`.
  *
  * Tolerant of the fields being absent, because the alternative is a user with a
  * pending MFA prompt who sees the app fall back to a generic failure — the one
@@ -71,14 +90,24 @@ export interface Challenge {
 export function parseChallenge(data: unknown): Challenge | null {
   if (typeof data !== "object" || data === null) return null;
   const raw = data as Record<string, unknown>;
-  const id = typeof raw.id === "string" ? raw.id : "";
   const kind = typeof raw.kind === "string" ? raw.kind : "";
-  if (id === "" && kind === "") return null;
+  const label = typeof raw.label === "string" ? raw.label : "";
+  // A number arrives as a string from the runner, because it is read off a screen
+  // and may carry the spacing Microsoft printed. Not parsed into a number: it is
+  // displayed, and a parse would reformat digits a user is matching by eye.
+  const challengeNumber = typeof raw.number === "string" && raw.number !== "" ? raw.number : null;
+  if (kind === "" && label === "" && challengeNumber === null) return null;
   return {
-    id,
     kind,
+    label,
+    number: challengeNumber,
     expiresAt: typeof raw.expiresAt === "string" ? raw.expiresAt : null,
   };
+}
+
+/** True when this challenge is one the user matches against a phone. */
+export function isPhoneApproval(challenge: Challenge): boolean {
+  return challenge.number !== null;
 }
 
 /** True when an event ends an export, whatever the outcome. */
