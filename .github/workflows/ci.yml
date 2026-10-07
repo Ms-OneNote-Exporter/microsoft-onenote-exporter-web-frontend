@@ -1,0 +1,114 @@
+# Pull-request checks for the frontend.
+#
+# ## Why this file exists, given `attest-deployment.yml` already exists
+#
+# Because that workflow runs on a **schedule and `workflow_dispatch` only**. It
+# never ran on a pull request, so every frontend PR merged with nothing executed:
+# the 187 tests and `vite build` were the entire verification, run by hand, and
+# `main` is not branch-protected either.
+#
+# The tests were already written and already passing. Nothing was being asked for
+# that did not already exist — which is the usual reason a missing CI job goes
+# unfilled, and the reason to add it without ceremony.
+#
+# ## Why the attestation job does not cover this
+#
+# It asserts that the *served* bytes match `dist/ASSETS.sha256`. That is exactly
+# the right check for a tampered bundle (§7.1) and exactly the wrong one for "did
+# this change work": a frontend that never deploys correctly produces served bytes
+# that match a bad build perfectly. It also only catches a bad deploy *after* the
+# fact, and only on its daily schedule.
+#
+# ## What is deliberately absent
+#
+# No browser, no functional smoke test. The attestation file says so itself, and
+# adding Playwright to the component that must stay free of secrets is not a
+# change to make quietly in a CI file.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The floor in package.json's `engines`, not "latest". A build that only
+          # passes on a newer Node than the project declares would be a build
+          # nobody can reproduce.
+          node-version: "22.13.0"
+          cache: npm
+
+      # `npm ci`, never `npm install`. The lockfile is hash-checked against every
+      # package it names, so this is the only install that fails on a tampered
+      # tarball. `npm install` would silently reconcile instead.
+      - name: install
+        run: npm ci
+
+      - name: typecheck
+        # `tsc -b`, not `tsc --noEmit`: the build config is what the app ships
+        # with, and it is the one that catches a type error in a file the test
+        # suite does not import.
+        run: npx tsc -b
+
+      - name: test
+        run: npm test
+
+      - name: build
+        # VITE_API_ORIGIN is required and has no default: a wrong default produces
+        # a bundle that looks fine, cannot work, and whose CSP `connect-src` names
+        # nothing. Set here to a placeholder, because this job's question is "does
+        # it compile and pass", not "is this the production origin".
+        env:
+          VITE_API_ORIGIN: https://one-backend.phttp.com
+        run: npm run build
+
+      - name: the build emitted an attestation manifest
+        # A build that produces no `ASSETS.sha256` has silently disabled §7.1 —
+        # the attestation job would have nothing to compare against, and report
+        # success. An empty manifest is a failure, not a pass.
+        run: |
+          set -euo pipefail
+          manifest=dist/ASSETS.sha256
+          if [ ! -s "$manifest" ]; then
+            echo "FAIL: $manifest is missing or empty; the attestation job would"
+            echo "have nothing to compare and would report success."
+            exit 1
+          fi
+          echo "attested $(wc -l < "$manifest") asset(s)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          # Uploaded on failure too, deliberately: a bundle is the easiest way to
+          # see what a broken build actually produced.
+          name: dist-${{ github.run_number }}
+          path: dist/
+          retention-days: 7
+
+      # The last step, and the one whose absence cost the backend fifteen hours.
+      #
+      # A duplicate key is a syntax error for GitHub Actions and invisible to a
+      # parser, so a broken workflow does not fail loudly — it silently stops
+      # being scheduled, and every run reports `failure` with **zero jobs** and a
+      # duration of 0s. The check runs here, on the same commit as the workflow, so
+      # the bad file is caught while it is being written rather than by someone
+      # noticing a green board that means nothing.
+      #
+      # Copied from the backend repository, where that incident happened.
+      - name: no workflow file contains a duplicate key
+        run: node .github/no-duplicate-keys.mjs
