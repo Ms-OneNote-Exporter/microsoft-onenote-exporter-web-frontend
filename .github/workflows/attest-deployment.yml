@@ -1,0 +1,81 @@
+# Scheduled deployment attestation — PLAN-v3 §7.1
+#
+# The hosting platform can write the deploy directory directly, so "the bytes I
+# reviewed are the bytes being served" is not true here. `dist/ASSETS.sha256` is
+# emitted on every build; this checks it against what the site is actually
+# serving.
+#
+# ## Why it runs on a schedule and not only on deploy
+#
+# A tampered bundle needs **no code change**. There is nothing to re-deploy, so
+# a deploy-triggered check would never fire. That is the whole reason §7.1 asks
+# for a schedule, and it is the reason this workflow is separate from the build.
+#
+# ## What it does *not* check
+#
+# Whether the page works. It asserts what is served, not what it does; a
+# functional smoke test needs a browser and is a different job.
+name: attest-deployment
+
+on:
+  schedule:
+    # 04:17 UTC daily. An off-the-hour minute on purpose: scheduled workflows are
+    # queued by GitHub and the top of the hour is the busiest slot, so an
+    # exact-hour cron is the one most likely to be delayed past its window.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Origin to verify (defaults to the deployed frontend)"
+        required: false
+        type: string
+  # Also after a deploy lands, so a bad build is caught in minutes rather than at
+  # the next nightly run.
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "vite/**"
+      - "vite.config.ts"
+      - "index.html"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: attest-deployment
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # The manifest is produced by this build, so the comparison is
+      # "what this build produces" against "what is served" — not against a
+      # committed copy, which would be a third source of truth to keep in step.
+      - name: Build
+        env:
+          VITE_API_ORIGIN: https://one-backend.phttp.com
+        run: npm run build
+
+      - name: Verify the deployment
+        env:
+          ATTEST_URL: ${{ inputs.base_url || 'https://microsoft-onenote-exporter.phttp.com' }}
+        run: node scripts/verify-deployment.mjs
