@@ -41,12 +41,6 @@ export function Consent({ onStarted }: { onStarted: () => void }) {
           settings. It will not add or remove a sign-in method.
         </li>
         <li>
-          <strong>One kind of two-factor sign-in cannot be completed here.</strong>{" "}
-          If Microsoft Authenticator shows you a number to type in rather than
-          asking you to approve a request, this build cannot finish it. It says so
-          in advance rather than failing you mid-sign-in.
-        </li>
-        <li>
           If you would rather not hand a Microsoft password to a web service,{" "}
           <strong>use the local exporter instead</strong>:{" "}
           <code>microsoft-onenote-exporter</code> produces the same vault on your

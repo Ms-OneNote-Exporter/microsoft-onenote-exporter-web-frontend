@@ -173,19 +173,3 @@ describe("T-F7: the consent copy, as rendered", () => {
     expect(text).not.toMatch(/anonymous/i);
   });
 });
-describe("T-F7: build limitations are disclosed, not discovered", () => {
-  it("says the number-matching MFA limitation before the user reaches it", () => {
-    // A disclosure about a capability is a disclosure like any other: the user
-    // is told what will not work before they rely on it. Discovered mid-sign-in,
-    // the same fact is a failure with no explanation.
-    expect(consentText()).toMatch(/number to type in/i);
-    expect(consentText()).toMatch(/cannot (?:be completed|finish) it/i);
-  });
-
-  it("distinguishes the MFA type that does work from the one that does not", () => {
-    // Saying only "2FA is not supported" would be wrong — code-based MFA works.
-    // Saying nothing at all leaves a user who hits it with no idea whether it is
-    // their account or the service.
-    expect(consentText()).toMatch(/approve a request/i);
-  });
-});
