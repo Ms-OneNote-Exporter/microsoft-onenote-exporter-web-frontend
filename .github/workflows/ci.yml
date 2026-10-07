@@ -112,3 +112,16 @@ jobs:
       # Copied from the backend repository, where that incident happened.
       - name: no workflow file contains a duplicate key
         run: node .github/no-duplicate-keys.mjs
+
+      # ...and the check itself is checked, because it had missed a duplicated
+      # `run:` in the backend repository — the same signature as the outage above,
+      # caused by a bug in the very script written to prevent it. It cleared its
+      # map of seen keys whenever it met a block scalar, so two `run:` keys on one
+      # step were never compared, and only plain scalars like `IMAGE_TAG` were
+      # ever checked.
+      #
+      # The fixtures cover both directions, because a scanner that flagged every
+      # `run:` in every workflow would be a scanner that got deleted: a duplicate
+      # must be flagged, and a normal workflow must not.
+      - name: the duplicate-key check can actually fail
+        run: node .github/no-duplicate-keys.test.mjs
