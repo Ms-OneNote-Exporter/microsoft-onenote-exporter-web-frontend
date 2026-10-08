@@ -171,6 +171,7 @@ sees an ordinary rejection. Nothing in this repository can prevent it.
 src/lib/protocol.ts        EXPECTED_PROTOCOL + the build-time API origin
 src/lib/version.ts         FRONTEND_VERSION, substituted from package.json at build time
 src/lib/api.ts             every request; the credential route; the boot handshake
+src/lib/failures.ts        ApiError -> what the user is told, per action (T-F9)
 src/lib/events.ts          cross-origin SSE, withCredentials, replay via Last-Event-ID
 src/lib/session.ts         snapshot types + tolerant parsers (see Outstanding questions)
 src/lib/useEventStream.ts  the SSE transport as React state
@@ -333,6 +334,12 @@ mechanism.
 - 403 without `X-CSRF-Token`, 409 with it — the CSRF fix proven end to end
 - the credential route accepts `X-Microsoft-Account`, and returns 400 without it
 
+A failed **List my notebooks** now says something, and says which of the three
+outcomes it was — still signing in, sign in again, or a listing already running.
+The button is disabled while the request is in flight. Verified against a stub,
+not against the live host: the real 409 was observed in the browser, before the
+fix.
+
 The version line under the `h1` shows this build's version and the backend's
 `build`. The backend value is the one the handshake already fetched and then
 discarded — it was in `boot.build` the whole time, unread.
@@ -383,7 +390,7 @@ client that turned `hunter2` into `"hunter2"` on the wire.**
 
 ### Tests
 
-`npm test` — 191 tests. Those cited by ID elsewhere in this file are real and
+`npm test` — 204 tests. Those cited by ID elsewhere in this file are real and
 named in the test sources:
 
 | ID | Asserts | File |
@@ -396,6 +403,7 @@ named in the test sources:
 | `T-F7` | the consent copy, against rendered text | `src/pages/consent.test.tsx` |
 | `T-F5` | the four boot states, incl. the version-mismatch screen | `src/App.test.tsx` |
 | `T-F8` | the header names this build's version and the backend's | `src/App.test.tsx` |
+| `T-F9` | a failed mutating call renders an explanation and leaves no unhandled rejection | `src/lib/failures.test.tsx` |
 
 Beyond the ID'd assertions, three files exist because of specific bugs rather
 than for coverage:
