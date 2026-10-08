@@ -4,6 +4,10 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
+    // Both vite configs read `version` out of package.json so it can be
+    // substituted into the bundle. Without this, `import pkg from
+    // "./package.json"` is a type error and `tsc -b` fails the build.
+    "resolveJsonModule": true,
     "jsx": "react-jsx",
     "types": ["vite/client", "node"],
 
