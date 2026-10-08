@@ -85,13 +85,42 @@ export function NotebookPicker({
         that one is the tens of seconds the listing then takes. A second click in
         either window earns a `503 busy` — the button refusing to be clicked
         twice is the whole fix for that half of the issue.
+
+        And disabled while the session is not signed in, which was missing and is
+        the case a user actually hits. The component already knew: `signedIn` gated
+        the Export button two elements below, and the hint below that tells the
+        reader to sign in first — but this button was live on a session with no
+        Microsoft sign-in.
+
+        The result was an action offered that could not succeed, answering with an
+        error. Observed on the deployed site: signed in at 12:10:16, clicked at
+        12:10:40, and got
+
+            "Still signing in — the service is not ready to list notebooks yet.
+             Try again in a moment."
+
+        The backend was **right** — `auth.state` was `authenticating` and the login
+        finished 24 seconds later. The message was accurate and the button was still
+        a trap: it invited a click whose only possible outcome was a refusal, and
+        made a normal part of signing in look like a failure.
+
+        Not gated on `view.state` alone. The snapshot reports `auth.state`
+        separately from `notebooks.state`, and the distinction is the whole thing:
+        `notebooks.state === "idle"` is true both before signing in and after, so it
+        cannot tell the user to wait.
       */}
       <button
         type="button"
         onClick={onList}
-        disabled={listingPending || view.state === "listing"}
+        disabled={!signedIn || listingPending || view.state === "listing"}
       >
-        {listingPending ? "Asking the service…" : view.state === "listing" ? "Listing…" : "List my notebooks"}
+        {!signedIn
+          ? "Sign in to list"
+          : listingPending
+            ? "Asking the service…"
+            : view.state === "listing"
+              ? "Listing…"
+              : "List my notebooks"}
       </button>
 
       {actionError && (
