@@ -169,6 +169,7 @@ sees an ordinary rejection. Nothing in this repository can prevent it.
 
 ```
 src/lib/protocol.ts        EXPECTED_PROTOCOL + the build-time API origin
+src/lib/version.ts         FRONTEND_VERSION, substituted from package.json at build time
 src/lib/api.ts             every request; the credential route; the boot handshake
 src/lib/events.ts          cross-origin SSE, withCredentials, replay via Last-Event-ID
 src/lib/session.ts         snapshot types + tolerant parsers (see Outstanding questions)
@@ -332,6 +333,10 @@ mechanism.
 - 403 without `X-CSRF-Token`, 409 with it — the CSRF fix proven end to end
 - the credential route accepts `X-Microsoft-Account`, and returns 400 without it
 
+The version line under the `h1` shows this build's version and the backend's
+`build`. The backend value is the one the handshake already fetched and then
+discarded — it was in `boot.build` the whole time, unread.
+
 ### What is not done
 
 - **The runner is not built.** `@msout/*` is unpublished, so
@@ -378,7 +383,7 @@ client that turned `hunter2` into `"hunter2"` on the wire.**
 
 ### Tests
 
-`npm test` — 163 tests. Those cited by ID elsewhere in this file are real and
+`npm test` — 191 tests. Those cited by ID elsewhere in this file are real and
 named in the test sources:
 
 | ID | Asserts | File |
@@ -390,6 +395,7 @@ named in the test sources:
 | `T-F2` | the served HTML references nothing external | `src/pages/consent.test.tsx` |
 | `T-F7` | the consent copy, against rendered text | `src/pages/consent.test.tsx` |
 | `T-F5` | the four boot states, incl. the version-mismatch screen | `src/App.test.tsx` |
+| `T-F8` | the header names this build's version and the backend's | `src/App.test.tsx` |
 
 Beyond the ID'd assertions, three files exist because of specific bugs rather
 than for coverage:

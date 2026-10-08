@@ -16,6 +16,8 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
 import { App } from "./App";
 import { EXPECTED_PROTOCOL } from "./lib/protocol";
+import { FRONTEND_VERSION } from "./lib/version";
+import pkg from "../package.json";
 
 afterEach(() => {
   cleanup();
@@ -171,6 +173,100 @@ describe("T-F5: the handshake screen", () => {
 
     await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
     expect(document.body.textContent).toMatch(/could not be read \(503\)/);
+  });
+
+  /**
+   * The version line.
+   *
+   * Two components deploy independently, so "which one am I looking at?" is a
+   * question with two answers, and a report carrying only a protocol number
+   * cannot be acted on. The backend's `build` was already fetched at handshake
+   * and then discarded, so this asserts against the value that was always
+   * available rather than a new request.
+   */
+  describe("T-F8: the header names both versions", () => {
+    it("shows this build's version and the backend's", async () => {
+      stubVersion(200, { protocol: EXPECTED_PROTOCOL, build: "deadbeefcafe" });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((url: string) =>
+          Promise.resolve(
+            url.includes("/api/public/version")
+              ? ({
+                  ok: true,
+                  status: 200,
+                  json: async () => ({ protocol: EXPECTED_PROTOCOL, build: "deadbeefcafe" }),
+                } as unknown as Response)
+              : ({
+                  ok: false,
+                  status: 401,
+                  json: async () => ({ error: "unauthorised" }),
+                } as unknown as Response),
+          ),
+        ),
+      );
+
+      render(<App />);
+      await screen.findByRole("heading", { name: /before you sign in/i });
+
+      const line = screen.getByTestId("versions").textContent ?? "";
+      expect(line).toContain(FRONTEND_VERSION);
+      // The backend's own build string, not the protocol. Two components, two
+      // build identifiers; showing one and calling it "the version" is what
+      // this assertion exists to prevent.
+      expect(line).toContain("deadbeefcafe");
+    });
+
+    it("prints the version from package.json, not a placeholder", () => {
+      // The value is substituted at build time, so a hardcoded fallback would
+      // pass every render test above while shipping a lie.
+      expect(FRONTEND_VERSION).toBe(pkg.version);
+      expect(FRONTEND_VERSION).not.toBe("");
+      expect(FRONTEND_VERSION).not.toMatch(/undefined|null|NaN/);
+    });
+
+    it("says 'unknown' rather than blank when the backend omits `build`", async () => {
+      // `build` is optional in the handshake response. An empty line reads as a
+      // rendering failure, and `undefined` in the text is worse than either.
+      stubVersion(200, { protocol: EXPECTED_PROTOCOL });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((url: string) =>
+          Promise.resolve(
+            url.includes("/api/public/version")
+              ? ({
+                  ok: true,
+                  status: 200,
+                  json: async () => ({ protocol: EXPECTED_PROTOCOL }),
+                } as unknown as Response)
+              : ({
+                  ok: false,
+                  status: 401,
+                  json: async () => ({ error: "unauthorised" }),
+                } as unknown as Response),
+          ),
+        ),
+      );
+
+      render(<App />);
+      await screen.findByRole("heading", { name: /before you sign in/i });
+
+      expect(screen.getByTestId("versions").textContent).toContain("unknown");
+    });
+
+    it("still names both protocols on a mismatch screen", async () => {
+      // The version line lives in the ready header, so a mismatched pair — the
+      // case where the versions most need comparing — does not get it. This
+      // asserts what the mismatch screen does say, so the gap is a decision
+      // rather than an oversight.
+      stubVersion(200, { protocol: EXPECTED_PROTOCOL - 1, build: "old-build" });
+      render(<App />);
+
+      await screen.findByRole("heading", { name: /out of date/i });
+      const text = document.body.textContent ?? "";
+      expect(text).toContain(String(EXPECTED_PROTOCOL));
+      expect(text).toContain(String(EXPECTED_PROTOCOL - 1));
+    });
   });
 
   it("does not open the event stream before a session exists", async () => {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, ProtocolMismatchError, api, assertProtocol } from "./lib/api";
 import { EXPECTED_PROTOCOL } from "./lib/protocol";
+import { FRONTEND_VERSION } from "./lib/version";
 import {
   parseSessionStatus,
   type NotebookList,
@@ -283,6 +284,15 @@ export function App() {
         <main className="shell">
           <header>
             <h1>OneNote Exporter</h1>
+            {/* Both versions, and both from a different place than each other.
+                `boot.build` came from the handshake, which is the only component
+                that knows what the backend is running — it was fetched, held in
+                state and never rendered. A version-skew report that carried only
+                the protocol number carried nothing to compare against, so the
+                number to compare had to be fetched and thrown away. */}
+            <p className="fineprint" data-testid="versions">
+              Frontend {FRONTEND_VERSION} · backend {boot.build}
+            </p>
             <p className="fineprint">Backend protocol {EXPECTED_PROTOCOL} confirmed.</p>
           </header>
 

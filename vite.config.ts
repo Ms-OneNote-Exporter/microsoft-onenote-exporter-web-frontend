@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import pkg from "./package.json";
 import { assetAttestation } from "./vite/asset-attestation";
 import { assertExactOrigin } from "./vite/csp";
 
@@ -38,6 +39,30 @@ if (API_ORIGIN === undefined || API_ORIGIN.trim() === "") {
 // still loads — which is the worst shape of failure for this particular header.
 const API_ORIGIN_VALIDATED = assertExactOrigin(API_ORIGIN);
 
+/**
+ * This build's version, from `package.json`, substituted into the bundle so the
+ * page can say which one it is (`src/lib/version.ts`).
+ *
+ * Read here rather than in `src/` because the alternative is importing
+ * `package.json` from application code, and esbuild would then inline the whole
+ * file — the dependency list included — into a shipped bundle. The define
+ * substitutes one string and nothing else.
+ *
+ * A missing or non-string `version` would render `undefined` on the page, which
+ * is worse than useless: it looks like a value. So it is refused, on the same
+ * principle as the missing `VITE_API_ORIGIN` above.
+ */
+const APP_VERSION = typeof pkg.version === "string" ? pkg.version.trim() : "";
+
+if (APP_VERSION === "") {
+  throw new Error(
+    "package.json has no usable `version`.\n\n" +
+      "The page prints its own version so a version-skew report carries something\n" +
+      "to compare against, and `vite.config.ts` substitutes it into the bundle.\n" +
+      "Add a `version` field to package.json and rebuild.",
+  );
+}
+
 export default defineConfig({
   plugins: [react(), assetAttestation(API_ORIGIN_VALIDATED)],
   server: { port: 5173 },
@@ -54,5 +79,8 @@ export default defineConfig({
     },
   },
   // Surfaced for the CI header assertion; the deployed header must match.
-  define: { __API_ORIGIN__: JSON.stringify(API_ORIGIN_VALIDATED) },
+  define: {
+    __API_ORIGIN__: JSON.stringify(API_ORIGIN_VALIDATED),
+    __APP_VERSION__: JSON.stringify(APP_VERSION),
+  },
 });
