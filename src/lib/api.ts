@@ -15,12 +15,46 @@
  */
 import { API_ORIGIN } from "./protocol";
 
-/** Non-2xx from the API, carrying the server's own error code when present. */
+/**
+ * Non-2xx from the API, carrying the server's own error code when present.
+ *
+ * `reason` and `retryable` are read from the same body as `code`, and they are
+ * what separate two answers that share a status.
+ *
+ * ## Why the status alone is not enough to write an honest message
+ *
+ * `POST /api/session/notebooks` answers `409` for two situations a user must act
+ * on differently, and the difference is not derivable from the number:
+ *
+ * | body | meaning | what the user should be told |
+ * |---|---|---|
+ * | `409 {"error":"not authenticated"}` | a sign-in is still in progress | try again in a moment |
+ * | `409 {retryable:false}`, `reason:"no_auth"` | the runner lost its cookie jar | sign in again — retrying cannot help |
+ * | `503 {retryable:true}`, `reason:"busy"` | a listing is already running | wait for it |
+ *
+ * The backend already draws those distinctions (`runnerFailure` in
+ * `api/src/routes.ts`), and the client was discarding the fields that carry
+ * them. Both are read here rather than inferred from `code`, because `code` is a
+ * human-readable sentence on the runner-failure path and a token on the
+ * route-guard path — matching on its text would be a guess with no failure mode
+ * when it goes stale.
+ */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
     readonly code?: string,
+    /**
+     * The machine-readable failure kind (`busy`, `no_auth`, `unreachable`, …).
+     * Absent on the route's own guards, which predate the field.
+     */
+    readonly reason?: string | undefined,
+    /**
+     * Whether the server says a retry can help. `undefined` means it did not
+     * say — which is not the same as `false`, and collapsing them would send a
+     * user to re-enter a password when waiting would have worked.
+     */
+    readonly retryable?: boolean | undefined,
   ) {
     super(message);
     this.name = "ApiError";
@@ -125,14 +159,25 @@ async function request<T>(path: string, opts: FetchOpts = {}): Promise<T> {
   const res = await fetch(`${API_ORIGIN}${path}`, init);
 
   if (!res.ok) {
+    // Read every field the server volunteers, and read them defensively: a
+    // missing or wrongly-typed one is a field absent from the answer, never a
+    // reason to throw a second error from the error path.
     let code: string | undefined;
+    let reason: string | undefined;
+    let retryable: boolean | undefined;
     try {
-      const parsed = (await res.json()) as { error?: unknown };
-      if (parsed && typeof parsed.error === "string") code = parsed.error;
+      const parsed = (await res.json()) as {
+        error?: unknown;
+        reason?: unknown;
+        retryable?: unknown;
+      };
+      if (typeof parsed?.error === "string") code = parsed.error;
+      if (typeof parsed?.reason === "string") reason = parsed.reason;
+      if (typeof parsed?.retryable === "boolean") retryable = parsed.retryable;
     } catch {
       // A non-JSON error body is not worth surfacing; the status is enough.
     }
-    throw new ApiError(res.status, `${res.status} ${path}`, code);
+    throw new ApiError(res.status, `${res.status} ${path}`, code, reason, retryable);
   }
 
   if (res.status === 204) return undefined as T;

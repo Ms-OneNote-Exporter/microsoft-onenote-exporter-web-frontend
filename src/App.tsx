@@ -9,6 +9,7 @@ import {
   type SessionStatus,
 } from "./lib/session";
 import { isPhoneApproval, parseChallenge, type Challenge } from "./lib/events-contract";
+import { describeFailure } from "./lib/failures";
 import { useEventStream } from "./lib/useEventStream";
 import { Consent } from "./pages/Consent";
 import { Credential } from "./pages/Credential";
@@ -38,6 +39,26 @@ export function App() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [challenge, setChallenge] = useState<Challenge | null>(null);
   const [view, setView] = useState<View>("consent");
+
+  /**
+   * The outcome of the last failed mutating call, or null.
+   *
+   * Separate from `statusError`, which means "the snapshot could not be read".
+   * Merging them would be wrong in both directions: a snapshot read recovers on
+   * its own, whereas this message is about an action the user just took and only
+   * the next attempt clears it.
+   */
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  /**
+   * True between asking for a listing and the request settling.
+   *
+   * A second click while the first POST is in flight is the compounding case: the
+   * backend answers `503 busy`, so the second click cannot help and turns a
+   * working button into a refusal. The listing itself takes tens of seconds, so
+   * this window is long enough to be hit by accident.
+   */
+  const [listingPending, setListingPending] = useState(false);
 
   // --- handshake ------------------------------------------------------------
   //
@@ -149,11 +170,21 @@ export function App() {
         // A notebook listing completed. Merging rather than replacing keeps a
         // concurrent export state intact.
         case "notebooks-listed":
+          setListingPending(false);
           setStatus((prev) =>
             prev
               ? { ...prev, notebooks: parseNotebooks(data) }
               : prev,
           );
+          break;
+
+        // A listing that never completes. The api translates the runner's
+        // `notebooks-failed` into this event, so it is the only signal that a
+        // request accepted with 202 has ended without a result — and without
+        // clearing the pending state the button would stay disabled forever with
+        // no explanation.
+        case "error":
+          setListingPending(false);
           break;
 
         case "export-queued":
@@ -397,12 +428,31 @@ export function App() {
               signedIn={status.signedIn}
               export={status.export}
               streamState={stream.state}
+              // One slot for the message, cleared on the next attempt rather
+              // than on any refresh: a refresh is not the user retrying, and
+              // silently dropping the explanation would leave them with a button
+              // that did nothing and no reason why.
+              actionError={actionError}
+              listingPending={listingPending}
               onList={() => {
-                void api.listNotebooks(csrfToken ?? "");
+                setActionError(null);
+                setListingPending(true);
+                // `.catch`, not `void`. The rejection was previously discarded,
+                // so a failed listing produced an unhandled promise rejection
+                // and no state change — nothing could be shown, because nothing
+                // was ever set.
+                void api
+                  .listNotebooks(csrfToken ?? "")
+                  .catch((err: unknown) => {
+                    setListingPending(false);
+                    setActionError(describeFailure(err, "list"));
+                  });
               }}
               onStart={(notebook) => {
-                void api.startExport(notebook, csrfToken ?? "").then(
-                  ({ exportId }) => {
+                setActionError(null);
+                void api
+                  .startExport(notebook, csrfToken ?? "")
+                  .then(({ exportId }) => {
                     // Optimistic: the stream's export-started event will
                     // confirm, but showing the card immediately beats leaving
                     // the button live and risking a second POST.
@@ -424,14 +474,20 @@ export function App() {
                           }
                         : prev,
                     );
-                  },
-                  () => {
-                    /* 409 or otherwise: the stream will report the truth. */
-                  },
-                );
+                  })
+                  .catch((err: unknown) => {
+                    // Previously an empty rejection handler reading "the stream
+                    // will report the truth". It usually would — but when the
+                    // export never starts there is no event to come, and the
+                    // button just sits there having done nothing.
+                    setActionError(describeFailure(err, "start"));
+                  });
               }}
               onAbort={(exportId) => {
-                void api.abort(exportId, csrfToken ?? "");
+                setActionError(null);
+                void api.abort(exportId, csrfToken ?? "").catch((err: unknown) => {
+                  setActionError(describeFailure(err, "abort"));
+                });
               }}
             />
           )}

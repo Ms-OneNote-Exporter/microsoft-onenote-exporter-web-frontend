@@ -20,6 +20,21 @@ export interface NotebookPickerProps {
   signedIn: boolean;
   export: RunningExport | null;
   streamState: "connecting" | "open" | "replaying" | "closed";
+  /**
+   * Why the last mutating call failed, or null.
+   *
+   * Rendered next to the button that was pressed, because a message on the far
+   * side of the page is a message nobody connects to the click.
+   */
+  actionError: string | null;
+  /**
+   * A listing request is in flight.
+   *
+   * Not the same as `notebooks.state === "listing"`, which is the *snapshot's*
+   * view and only catches up once a refresh lands. This is the local knowledge
+   * that a POST is on the wire, which is what a second click would compound.
+   */
+  listingPending: boolean;
   onList: () => void;
   onStart: (notebook: string) => void;
   onAbort: (exportId: string) => void;
@@ -30,6 +45,8 @@ export function NotebookPicker({
   signedIn,
   export: running,
   streamState,
+  actionError,
+  listingPending,
   onList,
   onStart,
   onAbort,
@@ -43,7 +60,14 @@ export function NotebookPicker({
   // A running export wins over the chooser: during one there is nothing to
   // pick, and offering a second start is what produces a 409.
   if (running) {
-    return <ExportProgress running={running} streamState={streamState} onAbort={onAbort} />;
+    return (
+      <ExportProgress
+        running={running}
+        streamState={streamState}
+        actionError={actionError}
+        onAbort={onAbort}
+      />
+    );
   }
 
   return (
@@ -55,9 +79,26 @@ export function NotebookPicker({
         container, so it takes a moment rather than appearing instantly.
       </p>
 
-      <button type="button" onClick={onList} disabled={view.state === "listing"}>
-        {view.state === "listing" ? "Listing…" : "List my notebooks"}
+      {/*
+        Disabled while the POST is on the wire as well as while the snapshot says
+        `listing`. The two cover different windows: this one is the round trip,
+        that one is the tens of seconds the listing then takes. A second click in
+        either window earns a `503 busy` — the button refusing to be clicked
+        twice is the whole fix for that half of the issue.
+      */}
+      <button
+        type="button"
+        onClick={onList}
+        disabled={listingPending || view.state === "listing"}
+      >
+        {listingPending ? "Asking the service…" : view.state === "listing" ? "Listing…" : "List my notebooks"}
       </button>
+
+      {actionError && (
+        <p className="error" role="alert">
+          {actionError}
+        </p>
+      )}
 
       <NotebookBody
         view={view}
@@ -150,10 +191,12 @@ function NotebookBody({
 function ExportProgress({
   running,
   streamState,
+  actionError,
   onAbort,
 }: {
   running: RunningExport;
   streamState: NotebookPickerProps["streamState"];
+  actionError: string | null;
   onAbort: (exportId: string) => void;
 }) {
   const finished = running.state === "done";
@@ -185,6 +228,15 @@ function ExportProgress({
       </p>
 
       <p aria-live="polite">{describeExport(running)}</p>
+
+      {/* Placed above the button rather than in the page-level error slot: while
+          an export runs the picker replaces the chooser, so a message rendered
+          where the List button was would not be on screen at all. */}
+      {actionError && (
+        <p className="error" role="alert">
+          {actionError}
+        </p>
+      )}
 
       {!finished && !stopped && (
         <button type="button" onClick={() => onAbort(running.id)}>
