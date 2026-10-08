@@ -107,6 +107,87 @@ export interface NotebookList {
 }
 
 /**
+ * Which notebook list survives when a refresh resolves.
+ *
+ * ## The rule this encodes
+ *
+ * **A refresh must not overwrite a field it does not know more about.** The
+ * client learns `notebooks` from two sources, and they are not equally
+ * informed at the moment a response arrives:
+ *
+ * 1. **SSE `notebooks-listed`** — a merge, and the *completed* listing. This is
+ *    the answer.
+ * 2. **`GET /api/session/status`** — a whole-snapshot replace. Its `notebooks`
+ *    field is whatever the server knew **when the request was made**, which for
+ *    a listing started moments earlier is "nothing yet".
+ *
+ * The backend emits `session-status` immediately after accepting a listing,
+ * before the runner has finished — tens of seconds, because it launches a
+ * browser. So the client fires a refresh at t+1ms and receives its answer at
+ * t+18s, by which time the `notebooks-listed` event at t+15s has already
+ * installed the three names:
+ *
+ * ```
+ * t+0ms     POST /notebooks -> 202
+ * t+1ms     SSE session-status -> refreshStatus() starts a round trip
+ * t+~15s    SSE notebooks-listed -> 3 names merged into state   <- the answer
+ * t+~18s    the t+1ms trip resolves with notebooks: []          <- overwritten
+ * ```
+ *
+ * Nothing re-triggers a refresh, so the list stays gone.
+ *
+ * ## Why the sequence number, and not only a listing flag
+ *
+ * The obvious fix is to track "a listing is in flight" and refuse to let a
+ * refresh empty the list while one is. **That does not close this race**, and it
+ * is worth being explicit about why: the flag is cleared by the very event that
+ * carries the answer. At t+18s, `notebooks-listed` has long since arrived, the
+ * flag is false, and the stale response is accepted.
+ *
+ * So the primary guard is staleness, not state. `seqAtRequest` is the notebook
+ * revision when the request went out; `seqNow` is the revision as it resolves.
+ * They differ exactly when the local list changed while the request was in
+ * flight — which is precisely when the response cannot be trusted for that
+ * field. This is the version that cannot be wrong, because it compares when each
+ * side learned the value rather than guessing from a state name.
+ *
+ * `listingInFlight` is kept as a second, independent guard: it also covers a
+ * listing that has been *started* but has not yet produced an event, where the
+ * sequence has not moved but the snapshot still predates the answer.
+ *
+ * The empty-list check is what keeps this from becoming its own bug. An account
+ * that genuinely has no notebooks must still clear the list — so this returns
+ * `incoming` whenever the snapshot has something to say, and `current` is only
+ * kept when the snapshot is empty and demonstrably older.
+ */
+export function reconcileNotebooks(args: {
+  current: NotebookList;
+  incoming: NotebookList;
+  seqAtRequest: number;
+  seqNow: number;
+  listingInFlight: boolean;
+}): NotebookList {
+  const { current, incoming, seqAtRequest, seqNow, listingInFlight } = args;
+
+  // A snapshot with names is never suppressed. Only an empty one can be stale in
+  // a way that loses data, and suppressing a non-empty list would freeze a
+  // deleted notebook on screen instead.
+  if (incoming.items.length > 0) return incoming;
+
+  // The list changed under us while this request was in flight, so its empty
+  // `notebooks` describes a moment before the change.
+  if (seqNow !== seqAtRequest) return current;
+
+  // Nothing changed locally, but a listing is running: the snapshot was taken
+  // before it produced a result, so its empty list means "not yet", not "none".
+  if (listingInFlight && current.items.length > 0) return current;
+
+  // Nothing in flight and nothing local to protect. A genuinely empty account
+  // must render as empty.
+  return incoming;
+}
+
+/**
  * A parsed snapshot, or the reason it could not be parsed.
  *
  * A failure is a value rather than a thrown error, because the user-facing

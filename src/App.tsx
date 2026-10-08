@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, ProtocolMismatchError, api, assertProtocol } from "./lib/api";
 import { EXPECTED_PROTOCOL } from "./lib/protocol";
 import { FRONTEND_VERSION } from "./lib/version";
 import {
   parseSessionStatus,
+  reconcileNotebooks,
   type NotebookList,
   type RunningExport,
   type SessionStatus,
 } from "./lib/session";
 import { isPhoneApproval, parseChallenge, type Challenge } from "./lib/events-contract";
 import { describeFailure } from "./lib/failures";
+import { parseNotebooks, readAuthState } from "./lib/notebooks-event";
 import { useEventStream } from "./lib/useEventStream";
 import { Consent } from "./pages/Consent";
 import { Credential } from "./pages/Credential";
@@ -93,7 +95,32 @@ export function App() {
   const ready = boot.phase === "ready";
 
   // --- snapshot -------------------------------------------------------------
+  //
+  // `notebooksSeq` counts revisions of the notebook list and `listingRef` records
+  // that a listing is running. Neither is React state: both are read *inside* a
+  // callback that must not re-create itself, and a re-created `refreshStatus`
+  // would re-fire every effect that depends on it. The revision is read at the
+  // moment the request goes out and again when it resolves — that difference is
+  // the whole staleness test, and it is documented in `reconcileNotebooks`.
+  const notebooksSeq = useRef(0);
+  const listingRef = useRef(false);
+
+  /**
+   * Install the notebook list locally, counting the revision.
+   *
+   * Every write to `notebooks` goes through here. A write that bypasses it does
+   * not increment the counter, and a refresh in flight at the time cannot tell
+   * its own snapshot was overtaken — which is the failure this whole mechanism
+   * exists to prevent, reintroduced through a second code path.
+   */
+  const setNotebooks = useCallback((notebooks: NotebookList) => {
+    notebooksSeq.current += 1;
+    setStatus((prev) => (prev ? { ...prev, notebooks } : prev));
+  }, []);
+
   const refreshStatus = useCallback(async () => {
+    // Read *before* the await: this is what the request is about to be asked.
+    const seqAtRequest = notebooksSeq.current;
     try {
       const parsed = parseSessionStatus(await api.status());
       if (!parsed.ok) {
@@ -109,7 +136,27 @@ export function App() {
         );
         return;
       }
-      setStatus(parsed.value);
+      // A replace, with one exception: `notebooks` is reconciled rather than
+      // overwritten. See `reconcileNotebooks` — a refresh must not replace a
+      // field it does not know more about.
+      setStatus((prev) =>
+        prev
+          ? {
+              ...parsed.value,
+              notebooks: reconcileNotebooks({
+                current: prev.notebooks,
+                incoming: parsed.value.notebooks,
+                seqAtRequest,
+                seqNow: notebooksSeq.current,
+                listingInFlight: listingRef.current,
+              }),
+            }
+          : parsed.value,
+      );
+      // The snapshot is the authority on whether a listing is still running, so
+      // it is what clears the flag — not the local belief, which is only ever
+      // right about the listing this tab asked for.
+      if (parsed.value.notebooks.state !== "listing") listingRef.current = false;
       setStatusError(null);
     } catch (err) {
       // A 401 is an *answer*, not a failure: the service has told us this visitor
@@ -170,12 +217,12 @@ export function App() {
         // A notebook listing completed. Merging rather than replacing keeps a
         // concurrent export state intact.
         case "notebooks-listed":
+          // The completed listing. Merged through `setNotebooks` so the revision
+          // advances — which is what tells any refresh already in flight that its
+          // snapshot predates this answer.
           setListingPending(false);
-          setStatus((prev) =>
-            prev
-              ? { ...prev, notebooks: parseNotebooks(data) }
-              : prev,
-          );
+          listingRef.current = false;
+          setNotebooks(parseNotebooks(data));
           break;
 
         // A listing that never completes. The api translates the runner's
@@ -185,6 +232,7 @@ export function App() {
         // no explanation.
         case "error":
           setListingPending(false);
+          listingRef.current = false;
           break;
 
         case "export-queued":
@@ -230,8 +278,19 @@ export function App() {
           setChallenge(null);
           break;
 
-        case "session-status":
         case "auth-state":
+          // The api emits `auth-state: {state: "authenticating"}` immediately
+          // before it starts a listing. Recorded rather than merely refreshed,
+          // because it is the earliest signal that the snapshot's `notebooks` is
+          // about to be wrong — and it arrives *before* the POST is even
+          // answered, so it covers the window the POST response does not.
+          if (readAuthState(data) === "authenticating") {
+            listingRef.current = true;
+          }
+          void refreshStatus();
+          break;
+
+        case "session-status":
         case "snapshot":
           // These carry a whole snapshot. `refreshStatus` obtains the same
           // payload from the REST route, so there is one parser rather than two.
@@ -437,6 +496,12 @@ export function App() {
               onList={() => {
                 setActionError(null);
                 setListingPending(true);
+                // Set before the request, not in its `.then`. The backend answers
+                // 202 and then emits `session-status`, so the refresh that event
+                // triggers is already in flight by the time the response is
+                // handled — and setting the flag afterwards would be too late to
+                // protect the request it caused.
+                listingRef.current = true;
                 // `.catch`, not `void`. The rejection was previously discarded,
                 // so a failed listing produced an unhandled promise rejection
                 // and no state change — nothing could be shown, because nothing
@@ -445,6 +510,9 @@ export function App() {
                   .listNotebooks(csrfToken ?? "")
                   .catch((err: unknown) => {
                     setListingPending(false);
+                    // Cleared: nothing is running, and leaving it set would
+                    // suppress every future empty snapshot for this session.
+                    listingRef.current = false;
                     setActionError(describeFailure(err, "list"));
                   });
               }}
@@ -507,46 +575,7 @@ export function App() {
   }
 }
 
-function readStringArray(data: unknown, key: string): string[] {
-  if (typeof data !== "object" || data === null) return [];
-  const value = (data as Record<string, unknown>)[key];
-  if (!Array.isArray(value)) return [];
-  return value.filter((n: unknown): n is string => typeof n === "string");
-}
-
-/**
- * Parse a `notebooks-listed` SSE payload.
- *
- * Defaults `state` to `loaded` because the event *is* the completed listing —
- * a payload with items but no state is a listing, not an idle server. Getting
- * this backwards would drop the user's notebooks into the "unrecognised state,
- * version problem" branch, which is a false alarm on the one screen where a
- * false alarm is most annoying.
- */
-/**
- * Parse a `notebooks-listed` SSE payload.
- *
- * Defaults `state` to `loaded` because the event *is* the completed listing — a
- * payload with items but no state is a listing, not an idle server. Getting this
- * backwards would drop the user's notebooks into a wrong branch, which is a false
- * alarm on the one screen where a false alarm is most annoying.
- *
- * An unrecognised state is mapped to `failed` rather than passed through: the
- * union is closed and transcribed from the api, so a value outside it is a
- * mismatch, and showing the listing as failed is the honest reading where
- * showing an empty chooser would not be.
- */
-function parseNotebooks(data: unknown): NotebookList {
-  if (typeof data !== "object" || data === null) {
-    return { state: "loaded", items: [] };
-  }
-  const raw = data as Record<string, unknown>;
-  const state = raw.state;
-  return {
-    state:
-      state === "idle" || state === "listing" || state === "loaded" || state === "failed"
-        ? state
-        : "loaded",
-    items: readStringArray(raw, "items"),
-  };
-}
+// `parseNotebooks` and `readAuthState` now live in `lib/notebooks-event.ts`.
+// They were private functions here, and both are decisions with failure modes
+// worth asserting away from a component: an unrecognised state, a missing field,
+// a payload that is not an object.
