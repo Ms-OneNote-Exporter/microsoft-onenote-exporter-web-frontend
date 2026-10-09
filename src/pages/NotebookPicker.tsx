@@ -12,7 +12,7 @@
  * credential has been accepted.
  */
 import { useState } from "react";
-import type { NotebookList, RunningExport } from "../lib/session";
+import type { ExportState, NotebookList, RunningExport } from "../lib/session";
 
 export interface NotebookPickerProps {
   notebooks: NotebookList;
@@ -57,9 +57,24 @@ export function NotebookPicker({
   // `unknown`; that was a workaround for a guess, and the guess was wrong.
   const view = notebooks;
 
-  // A running export wins over the chooser: during one there is nothing to
+  // A **running** export wins over the chooser: during one there is nothing to
   // pick, and offering a second start is what produces a 409.
-  if (running) {
+  //
+  // The word is load-bearing. This used to read `if (running)`, which is true for
+  // *every* export the snapshot knows about — including `done` — so a finished
+  // export replaced the chooser too, and the user was left on a dead end: the
+  // reference, the download link, and nothing to do with them.
+  //
+  // Observed on the deployed site, and it is what stopped the §0.8.1 re-proof:
+  // a completed export could not be followed by a second one, so the only way
+  // onward was to abandon the session and sign in again.
+  //
+  // The list needed for that second export is already here. It comes from the
+  // snapshot's `notebooks`, which the api persists (bug #39), so re-listing
+  // would claim a runner and spend ~20s in a container to return names the
+  // client is already holding. **No "List my notebooks" button** for that reason.
+  const inFlight = running !== null && !isTerminal(running.state);
+  if (inFlight) {
     return (
       <ExportProgress
         running={running}
@@ -71,13 +86,26 @@ export function NotebookPicker({
   }
 
   return (
-    <section className="card">
-      <h2>Choose a notebook</h2>
+    <>
+      {/* Kept above the chooser rather than replaced by it: the reference and the
+          download link are the record of what just happened, and hiding them the
+          moment a second export starts would lose them. */}
+      {running && (
+        <ExportProgress
+          running={running}
+          streamState={streamState}
+          actionError={actionError}
+          onAbort={onAbort}
+        />
+      )}
 
-      <p>
-        Listing your notebooks runs a short listing command in the isolated
-        container, so it takes a moment rather than appearing instantly.
-      </p>
+      <section className="card">
+        <h2>Choose a notebook</h2>
+
+        <p>
+          Listing your notebooks runs a short listing command in the isolated
+          container, so it takes a moment rather than appearing instantly.
+        </p>
 
       {/*
         Disabled while the POST is on the wire as well as while the snapshot says
@@ -139,7 +167,16 @@ export function NotebookPicker({
       <button
         type="button"
         disabled={!signedIn || !selected}
-        onClick={() => selected && onStart(selected)}
+        onClick={() => {
+          if (!selected) return;
+          // Cleared as the export is handed off, not after it comes back. The
+          // snapshot's `export` does not change until the POST resolves and a
+          // refresh lands, so without this the button stays live and armed with
+          // the notebook just exported — and a second click inside that window is
+          // the `409` the guard at the top of this file exists to prevent.
+          setSelected(null);
+          onStart(selected);
+        }}
       >
         Export {selected ? `“${selected}”` : ""}
       </button>
@@ -150,8 +187,24 @@ export function NotebookPicker({
           previous step first.
         </p>
       )}
-    </section>
+      </section>
+    </>
   );
+}
+
+/**
+ * Whether an export has finished, one way or another.
+ *
+ * `done`, `partial` and `failed` are all terminal: none of them will change again
+ * on its own, so none of them justifies hiding the chooser. `partial` in
+ * particular is not "stopped for now" — a user who stops an export will often
+ * immediately want another, which is exactly what the chooser is for.
+ *
+ * `none` never arrives here: it is what a session with no export at all parses to,
+ * and that is a null `running`, not a state.
+ */
+function isTerminal(state: ExportState): boolean {
+  return state === "done" || state === "partial" || state === "failed";
 }
 
 function NotebookBody({
