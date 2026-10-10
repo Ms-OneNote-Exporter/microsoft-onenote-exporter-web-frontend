@@ -22,6 +22,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { Credential } from "./Credential";
+import { ApiError } from "../lib/api";
 
 afterEach(() => cleanup());
 
@@ -205,6 +206,82 @@ describe("the credential form", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
     expect(submit).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The two 409s the credential route returns when a submit is a replay rather than a
+ * sign-in. Both are answers, not failures, and both used to fall through to
+ * `The service returned 409 (…)` — which is the shape of a bug report, not advice.
+ *
+ * `ApiError` is constructed the way `api.ts` constructs it, so these also break if
+ * the client ever stops reading `reason` out of the body.
+ */
+describe("a replayed submit, refused by the route", () => {
+  function refusingWith(reason: string) {
+    return vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError(
+          409,
+          "409 /api/session/credential",
+          "a sentence from the server",
+          reason,
+          false,
+        ),
+      );
+  }
+
+  it("moves on when the session turns out to be signed in already", async () => {
+    // `already-authenticated` means the thing the user wanted already happened, so
+    // the right response is the success response: clear both halves and go where a
+    // successful sign-in would have gone. Leaving the password in the DOM of a page
+    // the user is leaving is worse than the error was.
+    const submit = refusingWith("already-authenticated");
+    const onSubmitted = vi.fn();
+    render(<Credential onSubmitted={onSubmitted} submit={submit} />);
+
+    const input = fillBoth("hunter2");
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
+
+    await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalledTimes(1));
+    expect(input.value).toBe("");
+    expect((screen.getByLabelText(/microsoft account/i) as HTMLInputElement).value).toBe("");
+    // No error to show: nothing failed.
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says a sign-in is already running, and never says try again", async () => {
+    // The server answers `retryable: false` for this one, because a real login takes
+    // ~38 seconds against a 15-minute `TTL.loginInProgress`: resubmitting cannot help
+    // for 94x the duration of the thing it would be waiting on.
+    //
+    // The first assertion is the load-bearing one. Under the old `describe()`-only
+    // behaviour this text was "The service returned 409 (a sentence from the server).",
+    // which contains none of the things below — which is exactly why this test exists.
+    const submit = refusingWith("login-in-progress");
+    const onSubmitted = vi.fn();
+    render(<Credential onSubmitted={onSubmitted} submit={submit} />);
+
+    fillBoth("hunter2");
+    fireEvent.click(screen.getByRole("button", { name: /send sign-in details/i }));
+
+    await vi.waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    const text = screen.getByRole("alert").textContent ?? "";
+
+    expect(text).not.toMatch(/the service returned/i);
+    expect(text).not.toMatch(/try again/i);
+    expect(text).toMatch(/already running/i);
+    expect(text).toMatch(/wait/i);
+
+    // Still on this page, and nothing is thrown away: unlike the case above, nothing
+    // has succeeded yet, and a user who mistyped nothing should not have to retype.
+    expect(onSubmitted).not.toHaveBeenCalled();
+    // Releasing `busy` is what lets them do anything at all afterwards.
+    expect(
+      (screen.getByRole("button", { name: /send sign-in details/i }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
   });
 });
 
