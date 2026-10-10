@@ -98,6 +98,12 @@ function stubListingFailure(
  * jsdom has no `EventSource`, and a signed-in session opens one on mount — so
  * every test here needs a stub. A no-op that never fires, because none of these
  * tests are about the stream.
+ *
+ * The `listeners` registry is not decoration: the transport registers a handler
+ * for every name in the contract, and a stub without `addEventListener` throws
+ * `TypeError: source.addEventListener is not a function` inside `render(<App />)`.
+ * Nothing is guarded here on purpose — a stub that absorbed that call would let
+ * the missing wire come back silently.
  */
 function stubEventSource() {
   vi.stubGlobal(
@@ -107,6 +113,17 @@ function stubEventSource() {
       onopen: null | (() => void) = null;
       onerror: null | (() => void) = null;
       onmessage: null | ((e: MessageEvent) => void) = null;
+      readonly listeners = new Map<string, Set<EventListener>>();
+      addEventListener(type: string, listener: EventListener | null) {
+        if (!listener) return;
+        const forType = this.listeners.get(type) ?? new Set<EventListener>();
+        forType.add(listener);
+        this.listeners.set(type, forType);
+      }
+      removeEventListener(type: string, listener: EventListener | null) {
+        if (!listener) return;
+        this.listeners.get(type)?.delete(listener);
+      }
     },
   );
 }

@@ -53,6 +53,18 @@ const LOADED: NotebookList = { state: "loaded", items: ["Work", "Home", "Ideas"]
  * moment — which is the whole requirement here: the `notebooks-listed` frame has
  * to land *while* a refresh is already in flight, and that cannot be arranged by
  * waiting.
+ *
+ * ## The listener registry is not optional
+ *
+ * The transport registers a listener for every name in the contract
+ * (`src/lib/events.ts`), so a fake without `addEventListener` throws
+ * `TypeError: source.addEventListener is not a function` the moment `<App />`
+ * opens a stream — which it does here, because the session exists.
+ *
+ * `emit` routes the way a browser routes: a named frame goes to that name's
+ * listener, and an unnamed one to `onmessage`. Handing `onmessage` a `type`
+ * property is how the transport went on listening for no named events at all
+ * while its tests stayed green, and it is not repeated here.
  */
 function stubEventSource() {
   const instances: FakeEventSource[] = [];
@@ -62,15 +74,33 @@ function stubEventSource() {
     onopen: null | (() => void) = null;
     onerror: null | (() => void) = null;
     onmessage: null | ((e: MessageEvent) => void) = null;
+    readonly listeners = new Map<string, Set<EventListener>>();
     constructor() {
       instances.push(this);
     }
+    addEventListener(type: string, listener: EventListener | null) {
+      if (!listener) return;
+      const forType = this.listeners.get(type) ?? new Set<EventListener>();
+      forType.add(listener);
+      this.listeners.set(type, forType);
+    }
+    removeEventListener(type: string, listener: EventListener | null) {
+      if (!listener) return;
+      this.listeners.get(type)?.delete(listener);
+    }
     emit(event: string, data: unknown) {
-      this.onmessage?.({
+      const frame = {
         data: JSON.stringify(data),
         lastEventId: "1",
         type: event,
-      } as unknown as MessageEvent);
+      } as unknown as MessageEvent;
+      const forType = this.listeners.get(event);
+      if (!forType) {
+        // Nobody is listening for that name, which is what a browser does with
+        // it. Routing it to `onmessage` instead would hide a missing listener.
+        return;
+      }
+      for (const listener of forType) listener(frame as unknown as Event);
     }
   }
 
