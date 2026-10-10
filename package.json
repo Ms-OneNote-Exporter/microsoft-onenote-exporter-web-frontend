@@ -1,6 +1,6 @@
 {
   "name": "microsoft-onenote-exporter-web-frontend",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "description": "Component A: the static React build. No session state, no secret, no credential, no authorisation logic. Talks HTTP to the backend on a different origin.",
   "license": "MIT",
