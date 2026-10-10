@@ -80,6 +80,40 @@ export function Credential({ onSubmitted, submit }: CredentialProps) {
       setPassword("");
       onSubmitted();
     } catch (err) {
+      // **Two 409s from the credential route are not failures at all**, and both
+      // used to land on the generic `The service returned 409 (…)` below, which
+      // told the user nothing and left the password sitting in the DOM of a page
+      // they no longer needed to be on.
+      //
+      // The route refuses a *second* submit (§4.7: "no retry on the credential
+      // route — replaying a password defeats the point of a single submission"),
+      // which is a real answer to a real question, not an error to report:
+      //
+      //   already-authenticated — the session is signed in. That is the page the
+      //     user was already trying to reach, so take them there and drop the
+      //     credential, exactly as the success path does. Showing a failure for a
+      //     sign-in that already succeeded is the wrong answer to a question
+      //     nobody should have been asked.
+      //
+      //   login-in-progress — a sign-in is already running. Say so, and say what to
+      //     do instead. **Not** "try again": the server says `retryable: false`, and
+      //     a real login takes ~38s against a 15-minute `TTL.loginInProgress`, so a
+      //     resubmit provably cannot help. Telling someone to retry something that
+      //     cannot work is the same over-confidence as an optimistic `no_auth`.
+      if (err instanceof ApiError && err.reason === "already-authenticated") {
+        setAccount("");
+        setPassword("");
+        onSubmitted();
+        return;
+      }
+      if (err instanceof ApiError && err.reason === "login-in-progress") {
+        setError(
+          "A sign-in for this session is already running. Wait for it to finish; " +
+            "sending these details again will not start a second attempt.",
+        );
+        setBusy(false);
+        return;
+      }
       setError(describe(err));
       setBusy(false);
     }
