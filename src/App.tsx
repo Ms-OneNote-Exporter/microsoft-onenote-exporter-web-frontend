@@ -533,6 +533,10 @@ export function App() {
                               notebook,
                               state: "queued",
                               progress: null,
+                              // Nothing has run yet, so nothing can have been
+                              // lost. Null rather than zeros for the same reason
+                              // the parser uses: a zero would be a claim.
+                              failed: null,
                               partialReason: null,
                               error: null,
                               downloadUrl: null,

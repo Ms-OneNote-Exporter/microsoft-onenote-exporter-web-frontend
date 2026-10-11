@@ -78,12 +78,46 @@ export interface ExportProgress {
   assets: number;
 }
 
+/**
+ * `export.failed` — how much was **lost**, or null when the export says nothing
+ * about it.
+ *
+ * A sibling of `ExportProgress`, not a field of it: one is what was written, the
+ * other is what was not. The walk the user measured reported 29 pages and 8
+ * assets *and* 1 failed page (PLAN-EXPORT-CARD-TRUTH §1), so a card carrying
+ * only the first two renders a number that reads as success.
+ *
+ * The key is **`groups`**, and it is `groups` on the wire, in the stored row and
+ * here. The api says so explicitly (`api/src/auth.ts`, `StoredExportState`): a
+ * parser that renamed it to `failedGroups` on the way through would produce a
+ * snapshot with a key nothing consumes, and a closed parser drops unnamed keys
+ * silently — which is how a count gets written to SQLite, read back by nobody,
+ * and passes every test that only checks the event.
+ */
+export interface ExportFailures {
+  pages: number;
+  sections: number;
+  groups: number;
+}
+
 export interface RunningExport {
   /** `export.id` in the api. Never called `exportId`. */
   id: string;
   notebook: string;
   state: ExportState;
   progress: ExportProgress | null;
+  /**
+   * `export.failed` — how much was lost, or null when nothing says.
+   *
+   * **Null, never `{0, 0, 0}`.** Absent on a backend predating the field, and
+   * present-and-null on the paths that record no failures at all — `queued`, the
+   * start-failure write, an abort. A zero says "measured, and nothing was lost",
+   * which is a claim, and absence is not one; the same rule `progress` follows,
+   * for the same reason. Defaulting it to zeros here would render "0 pages
+   * failed" under every clean export, which is the noise the field exists to
+   * remove.
+   */
+  failed: ExportFailures | null;
   partialReason: PartialReason | null;
   /**
    * `export.error` — short, already safe to display.
@@ -283,6 +317,11 @@ export function parseSessionStatus(raw: unknown): Snapshot {
         notebook: str(exportRaw!.notebook),
         state: exportState as ExportState,
         progress: parseProgress(exportRaw!.progress),
+        // Read opportunistically, for the same reason as `error` below: a
+        // backend predating the field sends nothing, and that is absence rather
+        // than a version mismatch — failing the whole parse over a cosmetic
+        // field would break every page.
+        failed: parseFailures(exportRaw!.failed),
         partialReason: asPartialReason(exportRaw!.partialReason),
         // Read opportunistically. Absent on a backend that predates the field,
         // which is why it is not a reported mismatch: a missing optional field
@@ -378,6 +417,28 @@ function parseProgress(value: unknown): ExportProgress | null {
   if (!isRecord(value)) return null;
   const num = (key: string) => (typeof value[key] === "number" ? value[key] : 0);
   return { pages: num("pages"), sections: num("sections"), assets: num("assets") };
+}
+
+/**
+ * `export.failed`, read all-three-or-none.
+ *
+ * The same rule the api applies in `parseFailedCounts`, and for the same reason:
+ * a stored `{pages: 1}` with the other two missing would have to become either
+ * `{pages: 1, sections: 0, groups: 0}` — inventing two measured zeros, which
+ * render as "0 sections failed" beside a real loss — or a null that throws away
+ * a count the walk did report. Neither is a value; both are a lie in one of the
+ * two directions.
+ *
+ * `Number.isFinite` rather than `typeof` alone, because `NaN` and `Infinity` are
+ * both `typeof "number"`, and a card rendering "NaN pages failed" is exactly the
+ * failure this field was added to stop.
+ */
+function parseFailures(value: unknown): ExportFailures | null {
+  if (!isRecord(value)) return null;
+  const { pages, sections, groups } = value;
+  const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+  if (!finite(pages) || !finite(sections) || !finite(groups)) return null;
+  return { pages, sections, groups };
 }
 
 /** null / undefined / "" all mean "absent"; anything else is coerced. */

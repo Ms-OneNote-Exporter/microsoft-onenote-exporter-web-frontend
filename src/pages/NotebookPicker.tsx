@@ -12,7 +12,13 @@
  * credential has been accepted.
  */
 import { useState } from "react";
-import type { ExportState, NotebookList, RunningExport } from "../lib/session";
+import type {
+  ExportFailures,
+  ExportProgress,
+  ExportState,
+  NotebookList,
+  RunningExport,
+} from "../lib/session";
 
 export interface NotebookPickerProps {
   notebooks: NotebookList;
@@ -309,7 +315,15 @@ function ExportProgress({
         )}
       </p>
 
-      <p aria-live="polite">{describeExport(running)}</p>
+      {/*
+        The testid is not decoration: this is the only sentence on the card that
+        moves, so the far-side run that proves the counts reach the snapshot
+        samples it from outside the page — polling the surrounding card would
+        read the notebook name and the reference, which do not change.
+      */}
+      <p aria-live="polite" data-testid="export-progress-line">
+        {describeExport(running)}
+      </p>
 
       {/* Placed above the button rather than in the page-level error slot: while
           an export runs the picker replaces the chooser, so a message rendered
@@ -384,7 +398,15 @@ function describeExport(running: RunningExport): string {
         ? `${running.progress.pages} pages, ${running.progress.sections} sections, ${running.progress.assets} assets so far.`
         : "Working…";
     case "done":
-      return "Everything has been written to the vault.";
+      // The counts, because the sentence above them is a claim nobody can check.
+      // The same walk run in the command-line package printed "29 pages, 8
+      // assets, 1 page failed"; this card said only that everything was written,
+      // and a vault missing a page read exactly like a complete one.
+      return describeTerminal(
+        running,
+        "Everything has been written to the vault",
+        (counted) => ` — ${counted}`,
+      );
     case "failed":
       // The server's own text, appended. It is already safe to display per the
       // api, and a generic sentence alone leaves the user with no idea what to
@@ -401,11 +423,87 @@ function describeExport(running: RunningExport): string {
         case "disk":
           return "The export stopped because the container ran out of disk space. The vault is incomplete — free space and try again.";
         default:
-          // No reason, or one this build does not know. Say what is true and
-          // nothing more: the vault is incomplete, and we cannot say why.
-          return "The export stopped before it finished, so the vault is incomplete.";
+          // No reason, or one this build does not know — and **the common case
+          // here is not a stop at all**. The walk the user measured reached the
+          // end and came back one page short; "the export stopped before it
+          // finished" is false of that, and `partial` is reached whenever
+          // anything is lost, which is not the same as whenever something
+          // interrupted. So the counts and the losses are said, and nothing is
+          // claimed about the cause, which is genuinely unknown here.
+          return describeTerminal(
+            running,
+            "The vault is incomplete",
+            (counted) => ` — ${counted} were written`,
+          );
       }
     default:
       return "";
   }
+}
+
+/**
+ * A finished outcome: what was written, then what was lost.
+ *
+ * Both terminal branches are this, because they are the same fact — a vault that
+ * does not contain everything the walk reported. `lead` is what the branch knows
+ * for certain, and `written` is how the counts attach to it: the same counts
+ * need a different tail after "Everything has been written to the vault" than
+ * after "The vault is incomplete", because only the second is making a claim
+ * about the walk having reached its end.
+ *
+ * A missing count is left out rather than rendered as a zero — this is the same
+ * rule the parser follows, and for the same reason.
+ */
+function describeTerminal(
+  running: RunningExport,
+  lead: string,
+  written: (counted: string) => string,
+): string {
+  const body = running.progress ? `${lead}${written(counts(running.progress))}` : lead;
+  const lost = failures(running.failed);
+  return lost ? `${body}, ${lost}.` : `${body}.`;
+}
+
+/**
+ * "29 pages, 1 section and 8 assets" — the counts, in the vocabulary the api
+ * already uses, from `export.progress`.
+ */
+function counts(progress: ExportProgress): string {
+  return `${plural(progress.pages, "page")}, ${plural(progress.sections, "section")} and ${plural(
+    progress.assets,
+    "asset",
+  )}`;
+}
+
+/**
+ * "1 page failed", or "" when there is nothing to report.
+ *
+ * Empty for `null` — the walk recorded no failures, or the backend predates the
+ * field — and empty for an all-zero block, which is a *measured* zero: nothing
+ * was lost, and "0 pages failed" printed under a clean export is the sentence
+ * this field was added to delete. Only the non-zero kinds are named, so a lost
+ * page never drags two measured zeros into the sentence with it.
+ */
+function failures(failed: ExportFailures | null): string {
+  if (!failed) return "";
+  const lost: string[] = [];
+  if (failed.pages > 0) lost.push(plural(failed.pages, "page"));
+  if (failed.sections > 0) lost.push(plural(failed.sections, "section"));
+  if (failed.groups > 0) lost.push(plural(failed.groups, "group"));
+  return lost.length === 0 ? "" : `${joinAnd(lost)} failed`;
+}
+
+/**
+ * One is the common case — a single-section notebook, a single lost page — and
+ * "1 pages failed" is the sentence a user actually reads.
+ */
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "1 page", "2 pages and 3 sections", "1 page, 2 sections and 3 groups". */
+function joinAnd(parts: string[]): string {
+  const [last = ""] = parts.slice(-1);
+  const head = parts.slice(0, -1);
+  return head.length === 0 ? last : `${head.join(", ")} and ${last}`;
 }
