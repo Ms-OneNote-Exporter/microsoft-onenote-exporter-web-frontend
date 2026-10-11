@@ -34,6 +34,9 @@ function snapshot(over: Record<string, unknown> = {}): Record<string, unknown> {
       id: null,
       notebook: null,
       progress: null,
+      // `buildSnapshot` writes this key on every snapshot, so a real one carries
+      // it even with nothing lost. Absent only on a backend predating it.
+      failed: null,
       startedAt: null,
       finishedAt: null,
     },
@@ -281,5 +284,118 @@ describe("export.error, added after the first deployment", () => {
 
   it("is null when the server sends an empty string", () => {
     expect(failing({ error: "" })?.error).toBeNull();
+  });
+});
+
+/**
+ * `export.failed` — what was lost, not what was written.
+ *
+ * The fixture is the api's shape, transcribed from `SessionSnapshot.export`
+ * in `api/src/auth.ts:212`: `{ pages, sections, groups } | null`, written by
+ * `buildSnapshot` on every snapshot. The key is **`groups`**, not
+ * `failedGroups` — the same name on the wire and in the stored row, because a
+ * parser that renamed it in between would leave a key nobody reads and pass
+ * every test that only checks the event.
+ */
+describe("export.failed — what was lost, not what was written", () => {
+  /**
+   * The walk the user measured on 2026-10-11: "The Complete Notebook", one
+   * section, 29 pages, 8 assets — and 1 page lost. `partial` with no
+   * `partialReason`, because nothing stopped it; it simply came back short.
+   */
+  const partial = (over: Record<string, unknown> = {}) =>
+    parse({
+      export: {
+        state: "partial",
+        partialReason: null,
+        error: null,
+        id: "e1",
+        notebook: "The Complete Notebook",
+        progress: { pages: 29, sections: 1, assets: 8 },
+        failed: { pages: 1, sections: 0, groups: 0 },
+        startedAt: "2026-10-11T09:00:00.000Z",
+        finishedAt: "2026-10-11T09:03:49.000Z",
+        ...over,
+      },
+    }).export;
+
+  it("reads the three counts off the export", () => {
+    // The count that was missing is the whole reason this field exists: the
+    // command-line package reported "29 pages, 8 assets, 1 page failed" and the
+    // card could render neither the totals nor the loss.
+    expect(partial()?.failed).toEqual({ pages: 1, sections: 0, groups: 0 });
+  });
+
+  it("keeps it off `progress`, which is the counts that were written", () => {
+    // Two facts, not one merged count. Putting `failed` inside `progress` would
+    // make "29 pages" mean something different depending on which branch read it.
+    expect(partial()?.progress).toEqual({ pages: 29, sections: 1, assets: 8 });
+  });
+
+  it("is null when the backend predates the field", () => {
+    // Read opportunistically, like `error`: absence is a normal state, not a
+    // version mismatch, and failing the whole parse over it would break every
+    // page for a cosmetic gain.
+    const snap = snapshot({
+      export: {
+        state: "partial",
+        partialReason: null,
+        id: "e1",
+        notebook: "The Complete Notebook",
+        progress: { pages: 29, sections: 1, assets: 8 },
+        startedAt: null,
+        finishedAt: null,
+      },
+    });
+    const result = parseSessionStatus(snap);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.export?.failed).toBeNull();
+  });
+
+  it("is null when the server sends it as null", () => {
+    // The documented shape of an export that recorded no failures at all: the
+    // key present, the value null.
+    expect(partial({ failed: null })?.failed).toBeNull();
+  });
+
+  it("is null rather than zeros when the object is half-present", () => {
+    // `{pages: 1}` with the other two missing would have to become either
+    // `{pages: 1, sections: 0, groups: 0}` — inventing two measured zeros, which
+    // render as "0 sections failed" — or a null that throws away a real count.
+    expect(partial({ failed: { pages: 1 } })?.failed).toBeNull();
+    expect(partial({ failed: { pages: 1, sections: 0 } })?.failed).toBeNull();
+  });
+
+  it("is null rather than NaN when the counts are not numbers", () => {
+    // `"1"` is `typeof "string"` and `NaN` is `typeof "number"`; both are
+    // filtered here for the same reason the api filters them — a card rendering
+    // "NaN pages failed" is the failure this field was added to stop.
+    expect(partial({ failed: { pages: "1", sections: 0, groups: 0 } })?.failed).toBeNull();
+    expect(
+      partial({ failed: { pages: Number.NaN, sections: 0, groups: 0 } })?.failed,
+    ).toBeNull();
+  });
+
+  it("does not report a problem for an unreadable `failed`", () => {
+    // A malformed failure count is the api's problem to refuse — it already does,
+    // in `parseFailedCounts` — not this page's reason to refuse everything over.
+    const result = parseSessionStatus(
+      snapshot({
+        export: {
+          state: "partial",
+          partialReason: null,
+          id: "e1",
+          notebook: "The Complete Notebook",
+          progress: { pages: 29, sections: 1, assets: 8 },
+          failed: "one page",
+          startedAt: null,
+          finishedAt: null,
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.export?.failed).toBeNull();
   });
 });

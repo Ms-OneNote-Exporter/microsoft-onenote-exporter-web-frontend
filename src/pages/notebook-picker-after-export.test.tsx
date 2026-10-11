@@ -47,7 +47,10 @@ const LOADED: NotebookList = {
   items: ["The Complete Notebook", "MS is great", "MyFirstNotebook"],
 };
 
-function exportIn(state: ExportState): RunningExport {
+function exportIn(
+  state: ExportState,
+  over: Partial<Pick<RunningExport, "progress" | "failed" | "partialReason">> = {},
+): RunningExport {
   return {
     id: "k6gbuvNHBOJKGkQHozCtzGfLJmKJBcgVPGzM1534zmw",
     notebook: "MS is great",
@@ -58,6 +61,8 @@ function exportIn(state: ExportState): RunningExport {
     downloadUrl: state === "done" ? "https://one-backend.example/files/x/vault.zip" : null,
     fileName: state === "done" ? "vault.zip" : null,
     artifactPartial: false,
+    failed: null,
+    ...over,
   };
 }
 
@@ -171,5 +176,117 @@ describe("after an export finishes, the user can export another notebook", () =>
     // The ordinary case the fix must leave exactly as it was.
     renderPicker(null);
     expect(radio("MyFirstNotebook")).toBeDefined();
+  });
+});
+
+/**
+ * What the card *says* about a walk that has ended.
+ *
+ * ## The card was true and useless
+ *
+ * A finished export rendered one sentence: *"Everything has been written to the
+ * vault."* Nothing about how much. The same walk, run in the command-line
+ * package, printed **29 pages, 8 assets, 1 page failed** — and the card could
+ * render neither the totals nor the loss, so a vault missing a page read exactly
+ * like a complete one.
+ *
+ * ## The worse one: a sentence that was false
+ *
+ * The `partial` branch with no `partialReason` said *"The export stopped before
+ * it finished, so the vault is incomplete."* For the walk above that is false
+ * in its first clause: nothing stopped, the walk reached the end and came back
+ * short. And it is the **common** partial case — `partial` is reached whenever
+ * anything is lost, which is not the same as whenever something interrupted.
+ *
+ * These tests assert the rendered text, not the branch taken: the counts, the
+ * losses, and the absence of the false sentence.
+ */
+describe("the export card says what happened", () => {
+  /** The walk the user measured: 29 pages, 1 section, 8 assets, 1 lost page. */
+  const WALK = { pages: 29, sections: 1, assets: 8 };
+
+  it("counts what was written, on an export that finished", () => {
+    renderPicker(exportIn("done", { progress: WALK }));
+
+    // "Everything has been written" is a claim nobody can check; the counts are
+    // what make it checkable.
+    expect(screen.getByText(/written to the vault/)).toBeDefined();
+    expect(screen.getByText(/29 pages/)).toBeDefined();
+    expect(screen.getByText(/1 section/)).toBeDefined();
+    expect(screen.getByText(/8 assets/)).toBeDefined();
+  });
+
+  it("says what was lost, so a finished card does not read as a clean run", () => {
+    renderPicker(exportIn("done", { progress: WALK, failed: { pages: 1, sections: 0, groups: 0 } }));
+
+    expect(screen.getByText(/1 page failed/)).toBeDefined();
+  });
+
+  it("pluralises the losses, and names every kind that is non-zero", () => {
+    // One is the common case, so "1 pages failed" would be the sentence a user
+    // actually reads. `groups` is a real count on the wire, not a leftover.
+    renderPicker(
+      exportIn("done", { progress: WALK, failed: { pages: 2, sections: 1, groups: 3 } }),
+    );
+    expect(screen.getByText(/2 pages, 1 section and 3 groups failed/)).toBeDefined();
+  });
+
+  it("says nothing about failures when the walk reported none", () => {
+    // `null` is absence and `{0, 0, 0}` is a *measured* zero. Both render as a
+    // clean run: "0 pages failed" on every export is the noise this field was
+    // added to delete.
+    for (const failed of [null, { pages: 0, sections: 0, groups: 0 }] as const) {
+      cleanup();
+      renderPicker(exportIn("done", { progress: WALK, failed }));
+      expect(screen.getByText(/written to the vault/)).toBeDefined();
+      expect(screen.queryByText(/failed/)).toBeNull();
+    }
+  });
+
+  it("does not claim the export stopped early when nothing stopped it", () => {
+    // The false sentence, and the common case: the walk finished and lost a page.
+    renderPicker(
+      exportIn("partial", { progress: WALK, failed: { pages: 1, sections: 0, groups: 0 } }),
+    );
+
+    expect(screen.queryByText(/stopped before it finished/)).toBeNull();
+    // What is true is still said: the vault is short.
+    expect(screen.getByText(/incomplete/)).toBeDefined();
+    expect(screen.getByText(/29 pages/)).toBeDefined();
+    expect(screen.getByText(/1 page failed/)).toBeDefined();
+  });
+
+  it("still calls the vault incomplete when the losses were never counted", () => {
+    // A backend predating `failed`, or a terminal write that recorded none. The
+    // card cannot say how much is missing, so it says that it is — and not why.
+    renderPicker(exportIn("partial", { progress: WALK }));
+
+    expect(screen.queryByText(/stopped before it finished/)).toBeNull();
+    expect(screen.getByText(/incomplete/)).toBeDefined();
+    expect(screen.getByText(/29 pages/)).toBeDefined();
+  });
+
+  it("keeps the reason's own wording when there is a reason", () => {
+    // The branches the counts must not have cost: an aborted export is still the
+    // user's own doing, and quota and disk still say what to do about it.
+    for (const [reason, text] of [
+      ["aborted", /You stopped this export/],
+      ["quota", /quota was reached/],
+      ["disk", /ran out of disk space/],
+    ] as const) {
+      cleanup();
+      renderPicker(exportIn("partial", { partialReason: reason, progress: WALK }));
+      expect(screen.getByText(text)).toBeDefined();
+    }
+  });
+
+  it("gives the far-side poller a stable handle on the line", () => {
+    // The progress sentence is the only thing on the card that moves, and the
+    // walk that proves the counts reach the snapshot samples it from outside the
+    // page. A testid is what makes that sampling possible at all.
+    renderPicker(exportIn("running", { progress: WALK }));
+
+    const line = screen.getByTestId("export-progress-line");
+    expect(line.textContent).toMatch(/29 pages/);
   });
 });
