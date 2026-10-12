@@ -36,6 +36,12 @@ describe("the event names", () => {
       "login-failed",
       "auth-expired",
       "notebooks-listed",
+      // Immediately after `notebooks-listed` and before `export-queued`, which is
+      // where the api puts it (`api/src/sse.ts:28-50`). The order is the pin, not
+      // the count: the api's own name test is containment-only, so this
+      // order-sensitive `toEqual` is the only assertion in either repository that
+      // catches one side being updated and the other not.
+      "listing-log",
       "export-queued",
       "export-started",
       "export-progress",

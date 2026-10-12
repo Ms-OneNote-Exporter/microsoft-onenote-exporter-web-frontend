@@ -11,7 +11,7 @@
  * PLAN-v2 §9.2: names are clickable to fill the export block, greyed until the
  * credential has been accepted.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ExportFailures,
   ExportProgress,
@@ -19,6 +19,22 @@ import type {
   NotebookList,
   RunningExport,
 } from "../lib/session";
+
+/**
+ * One line of the runner's own output.
+ *
+ * The shape is the frame's, not a rendering's: `level` is whatever the run said
+ * (`listing-log` carries the package's level, `export-log` carries none), and
+ * `id` is the frame's SSE id rather than anything in the payload — see the dedupe
+ * in `App.tsx`, which is the only consumer of it.
+ */
+export interface LogLine {
+  /** The frame's SSE `id:`. The replay key. Never rendered. */
+  id: string;
+  text: string;
+  /** `INFO` unless the frame said otherwise. */
+  level: string;
+}
 
 export interface NotebookPickerProps {
   notebooks: NotebookList;
@@ -41,6 +57,23 @@ export interface NotebookPickerProps {
    * that a POST is on the wire, which is what a second click would compound.
    */
   listingPending: boolean;
+  /**
+   * The runner's output, oldest first, or nothing.
+   *
+   * Optional rather than required, because the block is additive to a page whose
+   * subject is the notebook chooser: a caller that has no stream has nothing to
+   * pass and should not have to invent an empty array to satisfy a prop. The
+   * default is the block's own empty state, which is what such a caller sees.
+   */
+  logLines?: LogLine[];
+  /**
+   * How many lines the cap took before these, or 0.
+   *
+   * Kept apart from `logLines` for the same reason the cap exists: the number the
+   * user needs is the one they cannot see. `0` means nothing has been dropped,
+   * which is the truth on every export short enough to fit.
+   */
+  droppedLogLines?: number;
   onList: () => void;
   onStart: (notebook: string) => void;
   onAbort: (exportId: string) => void;
@@ -53,6 +86,8 @@ export function NotebookPicker({
   streamState,
   actionError,
   listingPending,
+  logLines = [],
+  droppedLogLines = 0,
   onList,
   onStart,
   onAbort,
@@ -82,17 +117,25 @@ export function NotebookPicker({
   const inFlight = running !== null && !isTerminal(running.state);
   if (inFlight) {
     return (
-      <ExportProgress
-        running={running}
-        streamState={streamState}
-        actionError={actionError}
-        onAbort={onAbort}
-      />
+      <>
+        {/* Above the card, and in both branches, so the output keeps the same
+            place on the page whether an export is running or not — a block that
+            jumps when the view changes is a block nobody watches. */}
+        <LogBlock lines={logLines} dropped={droppedLogLines} />
+        <ExportProgress
+          running={running}
+          streamState={streamState}
+          actionError={actionError}
+          onAbort={onAbort}
+        />
+      </>
     );
   }
 
   return (
     <>
+      <LogBlock lines={logLines} dropped={droppedLogLines} />
+
       {/* Kept above the chooser rather than replaced by it: the reference and the
           download link are the record of what just happened, and hiding them the
           moment a second export starts would lose them. */}
@@ -211,6 +254,135 @@ export function NotebookPicker({
  */
 function isTerminal(state: ExportState): boolean {
   return state === "done" || state === "partial" || state === "failed";
+}
+
+/**
+ * How far from the bottom still counts as "following the tail".
+ *
+ * A few pixels of slack, because browsers round `scrollTop` and `clientHeight` to
+ * integers and a terminal that stops following because it was one pixel short
+ * looks exactly like one that has lost the stream.
+ */
+const FOLLOW_SLACK_PX = 24;
+
+/**
+ * The block: what the runner printed, oldest at the top and newest at the bottom.
+ *
+ * ## Why it exists at all
+ *
+ * The listing's only terminal event is `notebooks-listed`, and it arrives after
+ * the whole scrape — tens of seconds in which the page said nothing at all and a
+ * user could not tell "working" from "stuck". Everything between the click and
+ * that terminal is what this block shows.
+ *
+ * ## It follows the tail, but only while the reader has not taken over
+ *
+ * The convention every terminal has: a new line scrolls the view only if the
+ * reader is already at the bottom. Someone who has scrolled up to read a warning
+ * must not be dragged away by the next line, and the only way to know they did is
+ * to have been watching.
+ */
+function LogBlock({ lines, dropped }: { lines: LogLine[]; dropped: number }) {
+  const box = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Whether the view is pinned to the newest line.
+   *
+   * A ref and not state: it is written on every scroll event and read on every
+   * append, and in state each of those would re-render a block holding up to 500
+   * lines to change a boolean nothing renders.
+   */
+  const following = useRef(true);
+
+  useEffect(() => {
+    // A cleared block is a new run, and the new run starts following again: the
+    // reader's position belonged to the previous listing.
+    if (lines.length === 0) following.current = true;
+    const el = box.current;
+    if (el === null || !following.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [lines]);
+
+  const onScroll = () => {
+    const el = box.current;
+    if (el === null) return;
+    following.current = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_SLACK_PX;
+  };
+
+  return (
+    <>
+      {/*
+        The bounded, scrolling box. `.notebooks` is the only rule in the
+        stylesheet that provides one, and this change does not touch the
+        stylesheet — which is not only tidiness: the page's policy is
+        `style-src 'self'` with no `'unsafe-inline'`, so a `style` attribute is
+        dropped by the browser outright and an inline-styled block would ship
+        unstyled with nothing to say about it. The monospace comes from the
+        `<pre>` inside, which is monospace without being told.
+      */}
+      <div
+        className="notebooks"
+        ref={box}
+        onScroll={onScroll}
+        // `role="log"` is the append-only pattern, so a screen reader is told
+        // that new lines arrive here rather than only on navigation. It is
+        // deliberately not `alert`: a listing that prints 500 lines must not
+        // interrupt the reader 500 times.
+        role="log"
+        aria-label="Listing and export output"
+        data-testid="log-block"
+      >
+        {lines.length === 0 ? (
+          // Said rather than left blank. An empty box is indistinguishable from a
+          // block that failed to render, and this whole component exists because
+          // a silent page read as a stuck one.
+          <p className="fineprint">Nothing has been logged yet.</p>
+        ) : (
+          // One text run, oldest first. `<pre>` preserves the newlines these
+          // strings already carry, and rendering the marker *into the text* rather
+          // than into an element is what makes it survive being copied out of the
+          // page, printed in black and white, or read aloud — all three of which
+          // lose a colour and two of which lose a border.
+          <pre>{lines.map(renderLine).join("\n")}</pre>
+        )}
+      </div>
+
+      {/* Outside the box, so it cannot scroll away: it is the one sentence that
+          says the block above is not the whole of what was printed. */}
+      {dropped > 0 && (
+        <p className="fineprint" data-testid="log-dropped">
+          Showing the last {lines.length} of {lines.length + dropped} lines.
+        </p>
+      )}
+    </>
+  );
+}
+
+/**
+ * One rendered line: the marker, the level, then the text.
+ *
+ * **The severity is text, never colour** — and there is no colour here at all, so
+ * the question does not arise. The glyph is what a reader scanning a fast block
+ * finds, and the level word beside it is what still says what happened once the
+ * block is copied, printed, or read by something that cannot see.
+ *
+ * The level is compared case-insensitively, and deliberately so: the package's
+ * logger hands its sink the uppercase tag it formatted with (`'WARN'` into
+ * `_formatMessage`), while the api's own fixture for this frame writes `"warn"`,
+ * and `publish()` forwards the value verbatim. The page cannot know which
+ * spelling a given run used, and a marker that fires on only one of them is a
+ * marker that fails exactly when there is a warning to mark.
+ *
+ * An unrecognised level is shown as it arrived rather than folded into INFO: a
+ * level this build has never seen is a fact about the run, and calling it INFO
+ * would state something false about it.
+ */
+function renderLine(line: LogLine): string {
+  const level = line.level.toUpperCase();
+  if (level === "INFO") return line.text;
+  if (level === "WARN") return `! WARN: ${line.text}`;
+  if (level === "ERROR") return `× ERROR: ${line.text}`;
+  return `${line.level}: ${line.text}`;
 }
 
 function NotebookBody({
