@@ -12,8 +12,8 @@
  * repository gets to an integration test. It still cannot see CORS, cookies or
  * route existence — see the Status section of the README.
  */
-import { describe, expect, it, vi, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
+import { act, render, screen, cleanup, waitFor } from "@testing-library/react";
 import { App } from "./App";
 import { EXPECTED_PROTOCOL } from "./lib/protocol";
 import { FRONTEND_VERSION } from "./lib/version";
@@ -281,5 +281,326 @@ describe("T-F5: the handshake screen", () => {
 
     await screen.findByRole("heading", { name: /before you sign in/i });
     expect(EventSourceCtor).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The block showing what the runner printed while it works.
+ *
+ * ## The silence this ends
+ *
+ * `@msout/microsoft-onenote-list-notebooks` used to emit nothing at all during a
+ * listing, so between the click and `notebooks-listed` — tens of seconds, in a
+ * container launching a browser — the page said nothing, and a user could not tell
+ * "working" from "stuck". The line stream now exists end to end, and these cases
+ * assert the parts of it that are decisions rather than plumbing: the shape of a
+ * line, the replay dedupe, the cap, and the fact that a refresh cannot take any
+ * of it away.
+ *
+ * They run through `App` with real bytes on a fake source, because every one of
+ * those is a property of the page rather than of a component in isolation: the
+ * handler only runs because the transport registered a listener for the name, and
+ * a test that dispatched a frame by hand would pass if that registration were
+ * deleted.
+ */
+
+/** A signed-in session, which is what puts the export page — and the block — on screen. */
+const SIGNED_IN = {
+  session: { state: "authenticated" },
+  auth: { state: "valid" },
+  notebooks: { state: "loaded", items: ["Work"] },
+  export: { state: "none" },
+  artifact: { downloadUrl: null, partial: false },
+  csrfToken: "csrf-token",
+};
+
+/**
+ * One frame, in the bytes `encodeEvent` writes (`api/src/sse.ts:92`):
+ * `` id: <n>\nevent: <type>\ndata: <json>\n\n ``.
+ */
+function frame(type: string, data: unknown, id: string): string {
+  return `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+/**
+ * The transport fake again, and the reason it is here rather than imported is
+ * that `events.test.ts` owns the full one — backoff, teardown, the transport's
+ * own `error` event. What this file needs from it is narrower and different:
+ * bytes in, named dispatch out, onto whatever the page registered.
+ *
+ * Dispatching by `event.type` to that name's listener is the part that must
+ * match the real thing. An `EventSource` whose fake routes everything to
+ * `onmessage` would satisfy a page that had registered no listeners at all, which
+ * is the exact bug this chain of repositories spent its life shipping.
+ */
+class WireEventSource {
+  static instances: WireEventSource[] = [];
+
+  static last(): WireEventSource {
+    const last = WireEventSource.instances.at(-1);
+    if (!last) throw new Error("no EventSource was constructed");
+    return last;
+  }
+
+  readonly listeners = new Map<string, Set<EventListener>>();
+  onopen: (() => void) | null = null;
+  onmessage: ((e: MessageEvent) => void) | null = null;
+  onerror: (() => void) | null = null;
+  closed = false;
+
+  /** Parser state — the bytes that have arrived and the frame being built. */
+  private buffered = "";
+  private lastEventId = "";
+  private frameType = "";
+  private frameData: string[] = [];
+
+  constructor(readonly url: string) {
+    WireEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: EventListener | null) {
+    if (!listener) return;
+    const forType = this.listeners.get(type) ?? new Set<EventListener>();
+    forType.add(listener);
+    this.listeners.set(type, forType);
+  }
+
+  removeEventListener(type: string, listener: EventListener | null) {
+    if (!listener) return;
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  close() {
+    this.closed = true;
+  }
+
+  /** Push wire bytes in, a line at a time, dispatching on the blank line. */
+  feed(chunk: string) {
+    this.buffered += chunk;
+    let newline = this.buffered.indexOf("\n");
+    while (newline !== -1) {
+      const line = this.buffered.slice(0, newline).replace(/\r$/, "");
+      this.buffered = this.buffered.slice(newline + 1);
+      if (line === "") this.flush();
+      else if (!line.startsWith(":")) this.readField(line);
+      newline = this.buffered.indexOf("\n");
+    }
+  }
+
+  private readField(line: string) {
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    const value = colon === -1 ? "" : line.slice(colon + 1).replace(/^ /, "");
+    if (field === "id") this.lastEventId = value;
+    else if (field === "event") this.frameType = value;
+    else if (field === "data") this.frameData.push(value);
+  }
+
+  private flush() {
+    const data = this.frameData;
+    const type = this.frameType;
+    this.frameData = [];
+    this.frameType = "";
+    if (data.length === 0) return;
+    if (this.closed) return;
+    const event = {
+      data: data.join("\n"),
+      lastEventId: this.lastEventId,
+      type: type || "message",
+    } as unknown as MessageEvent;
+    // The browser's rule: an `event:` line names the listener, its absence means
+    // `message`. The page registers one listener per contract name, so a frame
+    // for a name it does not carry would be dropped — which is precisely how a
+    // listing log went missing before the name was transcribed.
+    if (event.type === "message") {
+      this.onmessage?.(event);
+      return;
+    }
+    for (const listener of [...(this.listeners.get(event.type) ?? [])]) {
+      listener(event as unknown as Event);
+    }
+  }
+}
+
+describe("the terminal block", () => {
+  beforeEach(() => {
+    WireEventSource.instances = [];
+  });
+
+  /**
+   * The export page, with a stream attached and a counter of the snapshot reads.
+   *
+   * The status route answers a *signed-in* session, because with no session the
+   * page shows the consent disclosure and the stream is never opened — which is
+   * itself asserted above, and which would make every case below vacuous.
+   */
+  async function renderExportPage() {
+    const fetchMock = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve(
+        url.includes("/api/public/version")
+          ? ({
+              ok: true,
+              status: 200,
+              json: async () => ({ protocol: EXPECTED_PROTOCOL, build: "abc123" }),
+            } as unknown as Response)
+          : ({ ok: true, status: 200, json: async () => SIGNED_IN } as unknown as Response),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("EventSource", WireEventSource);
+
+    render(<App />);
+    await screen.findByRole("heading", { name: /choose a notebook/i });
+
+    return {
+      source: WireEventSource.last(),
+      statusReads: () =>
+        fetchMock.mock.calls.filter((call) => String(call[0]).includes("/api/session/status"))
+          .length,
+    };
+  }
+
+  /** Bytes onto the wire, inside `act` because they re-render the page. */
+  function feed(source: WireEventSource, bytes: string) {
+    act(() => source.feed(bytes));
+  }
+
+  function block(): HTMLElement {
+    return screen.getByTestId("log-block");
+  }
+
+  it("says it has nothing yet, rather than rendering an empty box", async () => {
+    await renderExportPage();
+
+    // An empty box is indistinguishable from a block that failed to render, and
+    // the whole point of the block is that the page is no longer silent.
+    expect(block().textContent).toMatch(/nothing has been logged yet/i);
+  });
+
+  it("shows a listing line as it arrives, with its level as text", async () => {
+    const { source } = await renderExportPage();
+
+    feed(
+      source,
+      frame("listing-log", { line: "Network idle timeout - continuing anyway…", level: "WARN" }, "11"),
+    );
+
+    // The marker is the level word in the text, not a colour: the line still says
+    // what happened when it is copied out of the page or read by something that
+    // cannot see.
+    expect(block().textContent).toContain("! WARN: Network idle timeout");
+  });
+
+  it("shows an export line, and keeps every line of one export", async () => {
+    const { source } = await renderExportPage();
+
+    // Same `id` in both payloads: on `export-log` that is the **export** id, not
+    // the frame's. A dedupe keyed on it would keep the first line of the whole
+    // export and drop the other forty thousand.
+    feed(source, frame("export-log", { id: "artifact-1", line: "Walking page 1" }, "21"));
+    feed(source, frame("export-log", { id: "artifact-1", line: "Walking page 2" }, "22"));
+
+    expect(block().textContent).toContain("Walking page 1");
+    expect(block().textContent).toContain("Walking page 2");
+  });
+
+  it("prints a frame that arrives twice once, because a replay is not new work", async () => {
+    const { source } = await renderExportPage();
+
+    // The runner replays its ring from the pump's `since` cursor on every
+    // reconnect, so the bytes go out twice. A terminal that printed both would
+    // tell the user the line happened twice.
+    const bytes = frame("listing-log", { line: "Found 3 notebooks!", level: "INFO" }, "31");
+    feed(source, bytes);
+    feed(source, bytes);
+
+    const occurrences = (block().textContent ?? "").split("Found 3 notebooks!").length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it("caps the block at 500 lines, dropping the oldest and saying how many", async () => {
+    const { source } = await renderExportPage();
+
+    // One write, because the point is the cap rather than the transport's
+    // tolerance of a frame arriving in pieces.
+    let bytes = "";
+    for (let n = 1; n <= 512; n += 1) {
+      bytes += frame("listing-log", { line: `line ${n}`, level: "INFO" }, String(n));
+    }
+    feed(source, bytes);
+
+    const text = block().textContent ?? "";
+    // The newest survive; the oldest are the ones the cap takes, because what is
+    // left has to be what is happening now.
+    expect(text).toContain("line 512");
+    expect(text).not.toContain("line 1\n");
+    // And the loss is stated. A silently truncated block is the same "everything
+    // looks fine" shape as the export card that used to claim a complete vault
+    // over one that was missing a page.
+    expect(screen.getByTestId("log-dropped").textContent).toContain(
+      "Showing the last 500 of 512 lines",
+    );
+  });
+
+  it("keeps the replay set bounded, and the bound is real", async () => {
+    const { source } = await renderExportPage();
+
+    // Past MAX_SEEN_FRAME_IDS (1000) — the api's ring buffer is 500 frames and the
+    // set keeps twice that, so the set must evict rather than grow for the life of
+    // the session.
+    let bytes = "";
+    for (let n = 1; n <= 1300; n += 1) {
+      bytes += frame("listing-log", { line: `line ${n}`, level: "INFO" }, String(n));
+    }
+    feed(source, bytes);
+
+    // Inside the window, a replay is still one line: the dedupe's whole job.
+    const recent = frame("listing-log", { line: "line 1200", level: "INFO" }, "1200");
+    feed(source, recent);
+    const occurrences = (block().textContent ?? "").split("line 1200").length - 1;
+    expect(occurrences).toBe(1);
+
+    // And outside it, the bound is what it is: an id evicted before the window can
+    // no longer be recognised, so a replay of it prints twice. Pinned rather than
+    // left incidental, because it is the trade the bound buys — a fixed few
+    // kilobytes against a line that shows twice on a replay the api's ring buffer
+    // cannot have produced.
+    const evicted = frame("listing-log", { line: "line 1", level: "INFO" }, "1");
+    feed(source, evicted);
+    // The line was capped out of the visible block 800 lines ago, so its presence
+    // now can only be the re-append — and the total the view reports is where that
+    // shows: 1300 seen, then one more.
+    expect(block().textContent).toContain("line 1");
+    expect(screen.getByTestId("log-dropped").textContent).toContain(
+      "Showing the last 500 of 1301 lines",
+    );
+  });
+
+  it("keeps the block through a refresh, which carries no lines at all", async () => {
+    const { source, statusReads } = await renderExportPage();
+    feed(source, frame("listing-log", { line: "Found 3 notebooks!", level: "INFO" }, "41"));
+    const before = statusReads();
+
+    // `session-status` is the refresh trigger, and the snapshot it reads back
+    // has no field for any of this. A block rebuilt from the snapshot would be
+    // empty from here on — the silent block this change exists to remove.
+    feed(source, frame("session-status", SIGNED_IN, "42"));
+    await waitFor(() => expect(statusReads()).toBeGreaterThan(before));
+
+    expect(block().textContent).toContain("Found 3 notebooks!");
+  });
+
+  it("starts a fresh block when the next run is queued", async () => {
+    const { source } = await renderExportPage();
+    feed(source, frame("listing-log", { line: "Found 3 notebooks!", level: "INFO" }, "51"));
+    expect(block().textContent).toContain("Found 3 notebooks!");
+
+    // A reader who still has the last run's output above the new one cannot tell
+    // where this one begins, which is why a terminal clears its screen on a new
+    // command rather than scrolling on.
+    feed(source, frame("export-queued", { id: "artifact-2", notebook: "Work" }, "52"));
+
+    expect(block().textContent).not.toContain("Found 3 notebooks!");
+    expect(block().textContent).toMatch(/nothing has been logged yet/i);
   });
 });

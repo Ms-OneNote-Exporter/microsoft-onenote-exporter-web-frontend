@@ -15,7 +15,7 @@ import { parseNotebooks, readAuthState } from "./lib/notebooks-event";
 import { useEventStream } from "./lib/useEventStream";
 import { Consent } from "./pages/Consent";
 import { Credential } from "./pages/Credential";
-import { NotebookPicker } from "./pages/NotebookPicker";
+import { NotebookPicker, type LogLine } from "./pages/NotebookPicker";
 
 type Boot =
   | { phase: "checking" }
@@ -34,6 +34,38 @@ type Boot =
  * explains it.
  */
 type View = "consent" | "credential" | "export";
+
+/**
+ * How many lines the block keeps.
+ *
+ * A listing is tens of seconds of progress and an export is tens of thousands of
+ * lines, and this is a view for *watching*, not an archive: 500 lines is more
+ * than the block can show, and the oldest go first so that what stays is what is
+ * happening now. Nothing is dropped silently — `LogView.dropped` says how many,
+ * and the view prints it — because a silently truncated block is the same
+ * "everything looks fine" shape as the export card that used to say "written"
+ * over a vault that was missing a page.
+ */
+const MAX_LOG_LINES = 500;
+
+/**
+ * How many frame ids the replay-dedupe set keeps.
+ *
+ * Derived, not picked: the api's SSE ring buffer is 500 events
+ * (`api/src/config.ts`'s `sseBufferEvents`), and a reconnect replays from
+ * `Last-Event-ID` — so a duplicate can only ever arrive from within that window.
+ * Twice it is headroom; anything older cannot return because the ids are
+ * monotonic for the life of the session. The bound is what stops the set
+ * outliving every line it guards, which on a long export is the difference
+ * between a fixed few kilobytes and a slow leak for the session's life.
+ */
+const MAX_SEEN_FRAME_IDS = 1000;
+
+/** The block: the lines kept, and how many the cap has taken off the top. */
+interface LogView {
+  lines: LogLine[];
+  dropped: number;
+}
 
 export function App() {
   const [boot, setBoot] = useState<Boot>({ phase: "checking" });
@@ -211,8 +243,80 @@ export function App() {
   // long export survives a reconnect via the server's ring buffer.
   const sessionExists = status?.hasSession === true;
 
+  // --- the runner's own output -----------------------------------------------
+  //
+  // Event-only state, and the reason is the one this file has already paid for
+  // once: `refreshStatus` must never touch it. A refresh happens for reasons that
+  // have nothing to do with the listing or the export — a `session-status` frame,
+  // a reconnect, the read that follows a mutation — and the snapshot it returns
+  // carries no log lines at all. A block rebuilt from the snapshot would therefore
+  // be empty after every refresh, which is precisely the silence frontend #33
+  // exists to remove: thirty seconds of a listing rendering nothing. So nothing
+  // in the block below reads `status`, and `refreshStatus` above writes none of it.
+  const [log, setLog] = useState<LogView>({ lines: [], dropped: 0 });
+
+  /**
+   * Frame ids already appended, so a frame delivered twice is shown once.
+   *
+   * Keyed on the frame's own SSE `id:` — the api hub's monotonic counter for the
+   * life of the session (`SessionHub.nextId`, `api/src/sse.ts:109`) — and never on
+   * the payload's `id`. On `export-log` that payload field is the **export** id:
+   * the same value on every line of one run, so a set of payload ids would keep
+   * the first line and silently throw the rest of the export's output away.
+   *
+   * A duplicate is an ordinary event, not an error. The runner replays its ring
+   * from the pump's `since` cursor on every reconnect
+   * (`runner/src/index.ts:232`), so a line the user has already seen can arrive
+   * a second time, and a block that printed it twice reads as the work having
+   * happened twice.
+   */
+  const seenFrameIds = useRef(new Set<string>());
+
+  const appendLogLine = useCallback((frameId: string, text: string, level: string) => {
+    // An empty id cannot be a key: every frame would be a duplicate of the first
+    // one and the block would hold exactly one line forever. A frame without an
+    // `id:` is kept and not deduplicated, which is the honest reading — it is
+    // this client that cannot identify it, not proof that it is a replay.
+    if (frameId !== "") {
+      if (seenFrameIds.current.has(frameId)) return;
+      seenFrameIds.current.add(frameId);
+      // Bounded, because the set outlives every line it guards. Ids are monotonic
+      // for the life of the session, so the only way an id returns is a replay,
+      // and a replay is bounded by the api's ring buffer — `sseBufferEvents: 500`
+      // frames, configurable in `api/src/config.ts`. Keeping twice that is
+      // headroom, and evicting the oldest is safe because a Set iterates in
+      // insertion order and the oldest id is the one furthest beyond any replay.
+      // The cost of the bound being wrong is one line shown twice; the cost of
+      // having no bound is a set that grows for the life of the session.
+      while (seenFrameIds.current.size > MAX_SEEN_FRAME_IDS) {
+        const oldest = seenFrameIds.current.values().next().value;
+        if (oldest === undefined) break;
+        seenFrameIds.current.delete(oldest);
+      }
+    }
+    setLog((prev) => {
+      const lines = [...prev.lines, { id: frameId, text, level }];
+      if (lines.length <= MAX_LOG_LINES) return { lines, dropped: prev.dropped };
+      const overflow = lines.length - MAX_LOG_LINES;
+      return { lines: lines.slice(overflow), dropped: prev.dropped + overflow };
+    });
+  }, []);
+
+  /**
+   * A fresh block for a fresh run, which is what a terminal does when you start
+   * a new command.
+   *
+   * `seenFrameIds` is deliberately **not** cleared with it. The api's frame ids
+   * are monotonic for the life of the session, so an id from a previous run can
+   * never come back; emptying the set would only re-admit a replay of this run's
+   * own frames.
+   */
+  const clearLog = useCallback(() => {
+    setLog({ lines: [], dropped: 0 });
+  }, []);
+
   const onStreamEvent = useCallback(
-    ({ event, data }: { event: string; data: unknown }) => {
+    ({ id, event, data }: { id: string; event: string; data: unknown }) => {
       switch (event) {
         // A notebook listing completed. Merging rather than replacing keeps a
         // concurrent export state intact.
@@ -236,6 +340,15 @@ export function App() {
           break;
 
         case "export-queued":
+          // A fresh block, before the refresh. The lines above the chooser belong
+          // to the run that is starting now, and a reader who has the previous
+          // export's output still on screen cannot tell where this one begins —
+          // the absence of a gap is the whole reason a terminal clears its screen
+          // on a new command.
+          clearLog();
+          void refreshStatus();
+          break;
+
         case "export-started":
         case "export-progress":
         case "export-done":
@@ -248,6 +361,34 @@ export function App() {
           // rather than approximately correct.
           void refreshStatus();
           break;
+
+        case "export-log": {
+          // This event has been arriving for the whole life of the product with no
+          // case reading it: `EVENT_TYPES` carried the name, the transport
+          // registered a listener for it, and nothing consumed it. An export ran
+          // for tens of thousands of lines and the page showed a progress sentence.
+          const line = logText(data, "line");
+          if (line === null) break;
+          // INFO because the frame says nothing else. `export-log`'s payload is
+          // `{id, line}` — `{id}` being the export's, per `publish()` in the api's
+          // `runner-adapter-http.ts` — and there is no level on it to forward. The
+          // alternative, leaving the level unset, renders a line whose severity
+          // the view has to guess at.
+          appendLogLine(id, line, "INFO");
+          break;
+        }
+
+        case "listing-log": {
+          // `{line, level}` verbatim, as the api's `publish()` re-emits it, so
+          // the level is the package's and not this page's judgement. That is the
+          // point of the field: both warnings this listing can emit are ones it
+          // continues past anyway, and without the level the frame says nothing
+          // the reader could act on.
+          const line = logText(data, "line");
+          if (line === null) break;
+          appendLogLine(id, line, logText(data, "level") ?? "INFO");
+          break;
+        }
 
         case "login-success":
           // The credential was accepted. The status read that follows is what
@@ -304,7 +445,7 @@ export function App() {
           break;
       }
     },
-    [refreshStatus],
+    [refreshStatus, appendLogLine, clearLog],
   );
 
   const stream = useEventStream(sessionExists, onStreamEvent);
@@ -493,9 +634,21 @@ export function App() {
               // that did nothing and no reason why.
               actionError={actionError}
               listingPending={listingPending}
+              // Event-only, so it is passed separately from everything above:
+              // nothing in the snapshot has a word to say about what the runner
+              // printed, and merging it into `status` would put it exactly one
+              // `setStatus` away from being wiped by the next refresh.
+              logLines={log.lines}
+              droppedLogLines={log.dropped}
               onList={() => {
                 setActionError(null);
                 setListingPending(true);
+                // The block clears on the click rather than on the first
+                // `listing-log` frame: a listing takes tens of seconds to produce
+                // its first line, and a block holding the last run's output
+                // through that silence reads as the new listing already having
+                // produced it.
+                clearLog();
                 // Set before the request, not in its `.then`. The backend answers
                 // 202 and then emits `session-status`, so the refresh that event
                 // triggers is already in flight by the time the response is
@@ -583,3 +736,20 @@ export function App() {
 // They were private functions here, and both are decisions with failure modes
 // worth asserting away from a component: an unrecognised state, a missing field,
 // a payload that is not an object.
+
+/**
+ * One string field of a log frame, or null.
+ *
+ * Null for `""` as well as for a missing or non-string field, because an empty
+ * line is not output: rendering one adds a blank row that the reader has to work
+ * out is not a line, and the api drops an empty id for the same reason it does.
+ *
+ * The field names are transcribed from `publish()` in the api's
+ * `runner-adapter-http.ts`: `listing-log` carries `{line, level}`, `export-log`
+ * carries `{id, line}` and no level.
+ */
+function logText(data: unknown, key: string): string | null {
+  if (typeof data !== "object" || data === null) return null;
+  const value = (data as Record<string, unknown>)[key];
+  return typeof value === "string" && value !== "" ? value : null;
+}

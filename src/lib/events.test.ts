@@ -507,4 +507,24 @@ describe("named events: what the api actually writes", () => {
     expect(source.closed).toBe(false);
     expect(states).not.toContain("replaying");
   });
+
+  it("(h) delivers a `listing-log` frame, with the frame id the dedupe keys on", () => {
+    const seen: { id: string; event: string; data: unknown }[] = [];
+    openEventStream({ onEvent: (id, event, data) => seen.push({ id, event, data }) });
+    const source = FakeEventSource.last();
+
+    // Transcribed from `encodeEvent` plus the api's `publish()` for this case:
+    // `{line, level}` and **no `id`** in the payload, because a listing has no
+    // artifact behind it. The id that arrives is therefore the hub's frame id,
+    // which is the only replay key the frame has — the one the page dedupes on.
+    source.feed('id: 77\nevent: listing-log\ndata: {"line":"Found 3 notebooks!","level":"INFO"}\n\n');
+
+    expect(seen).toEqual([
+      {
+        id: "77",
+        event: "listing-log",
+        data: { line: "Found 3 notebooks!", level: "INFO" },
+      },
+    ]);
+  });
 });

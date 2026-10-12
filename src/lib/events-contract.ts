@@ -30,6 +30,12 @@ export const EVENT_TYPES = [
   "login-failed",
   "auth-expired",
   "notebooks-listed",
+  // The listing's own output as it happens, forwarded from the runner. The
+  // position is load-bearing and not cosmetic: the api inserts this name at the
+  // same index (`api/src/sse.ts:28`), and both sides pin the list with an
+  // order-sensitive `toEqual`, so a name that is merely *present* on one side
+  // reds the other's transcription test.
+  "listing-log",
   "export-queued",
   "export-started",
   "export-progress",
