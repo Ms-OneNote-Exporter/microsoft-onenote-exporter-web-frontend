@@ -32,6 +32,9 @@ describe("the event names", () => {
       "login-started",
       "challenge",
       "challenge-expired",
+      // Immediately after `challenge-expired`, which is where the api puts it
+      // (`api/src/sse.ts`). The order is the pin, not the count — see `listing-log`.
+      "challenge-seen",
       "login-success",
       "login-failed",
       "auth-expired",
