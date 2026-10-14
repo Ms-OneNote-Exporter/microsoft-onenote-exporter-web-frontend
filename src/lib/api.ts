@@ -308,6 +308,28 @@ export const api = {
       csrfToken,
     }),
 
+  /**
+   * Hands a typed MFA code to the sign-in that is waiting for one.
+   *
+   * **`csrfToken` is a required parameter, not an optional one**, for the same reason
+   * it is on every other mutating call in this file: the server's `onRequest` hook
+   * refuses the request without it, so a call site that forgot it would render a form
+   * that fails with a bare `forbidden` and no field pointing at the cause.
+   *
+   * The code goes as **JSON**, unlike the password, and the distinction is not
+   * arbitrary: the credential route's rule is that a password must arrive
+   * byte-identical, and everything above it — the framing, the cap, the stream — exists
+   * to protect that. A six-digit code is not a credential the browser is handling, and
+   * the server validates its shape (non-empty, at most 32 characters) before the
+   * runner uses it.
+   */
+  answerChallenge: (code: string, csrfToken: string) =>
+    request<void>("/api/session/challenge/answer", {
+      method: "POST",
+      body: { code },
+      csrfToken,
+    }),
+
   /** Invalidates the server row *and* expires the cookie — both, in that call. */
   erase: (csrfToken: string) =>
     request<void>("/api/session/erase", { method: "POST", csrfToken }),

@@ -604,3 +604,154 @@ describe("the terminal block", () => {
     expect(block().textContent).toMatch(/nothing has been logged yet/i);
   });
 });
+/**
+ * Which challenge gets which screen.
+ *
+ * ## What was broken
+ *
+ * A `challenge` of kind `code` rendered a notice saying "follow the prompt on your
+ * phone" — advice for a phone-approval — and the api answered the same challenge with
+ * `login-failed {reason: "challenge-not-supported"}`. So a user holding the code
+ * Microsoft had just texted was told, in two places, that their password was wrong.
+ *
+ * The split is therefore a decision, not a refactor: `code` needs an input and the
+ * other kinds do not. These cases go through `App` on real bytes because the choice is
+ * made in the render tree, and a test of the component alone would pass whatever the
+ * page decided to render for it.
+ */
+describe("an outstanding MFA challenge", () => {
+  beforeEach(() => {
+    WireEventSource.instances = [];
+  });
+
+  /** The export page with a stream attached, and its `fetch` spy. */
+  async function renderWithStream() {
+    const fetchMock = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve(
+        url.includes("/api/public/version")
+          ? ({
+              ok: true,
+              status: 200,
+              json: async () => ({ protocol: EXPECTED_PROTOCOL, build: "abc123" }),
+            } as unknown as Response)
+          : ({ ok: true, status: 200, json: async () => SIGNED_IN } as unknown as Response),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("EventSource", WireEventSource);
+
+    render(<App />);
+    await screen.findByRole("heading", { name: /choose a notebook/i });
+
+    return { source: WireEventSource.last(), fetchMock };
+  }
+
+  function feed(source: WireEventSource, bytes: string) {
+    act(() => source.feed(bytes));
+  }
+
+  it("asks a code challenge for the code, instead of advising the phone", async () => {
+    const { source } = await renderWithStream();
+
+    feed(
+      source,
+      frame(
+        "challenge",
+        {
+          kind: "code",
+          label: "Enter the code we sent to your phone",
+          number: null,
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+        },
+        "61",
+      ),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: /enter the code microsoft sent you/i }),
+    ).toBeTruthy();
+    expect(screen.getByLabelText(/sign-in code/i)).toBeTruthy();
+    // The notice it replaces said "follow the prompt on your phone", which is advice
+    // for a challenge the user acts on without typing anything.
+    expect(document.body.textContent).not.toMatch(/follow the prompt on your phone/i);
+  });
+
+  it("keeps showing the number for a phone-approval challenge, with no input", async () => {
+    const { source } = await renderWithStream();
+
+    feed(
+      source,
+      frame(
+        "challenge",
+        {
+          kind: "phone-approval",
+          label: "Tap approve in your phone",
+          number: "42 918 337",
+          expiresAt: null,
+        },
+        "62",
+      ),
+    );
+
+    // There is no code to type on this path — an input asking for six digits would be
+    // a question the user cannot answer.
+    expect(screen.queryByLabelText(/sign-in code/i)).toBeNull();
+    expect(screen.getByLabelText(/number to match/i).textContent).toBe("42 918 337");
+  });
+
+  it("sends the code to the answer route with the session's CSRF token", async () => {
+    const { source, fetchMock } = await renderWithStream();
+    feed(
+      source,
+      frame(
+        "challenge",
+        { kind: "code", label: "", number: null, expiresAt: null },
+        "63",
+      ),
+    );
+
+    const input = screen.getByLabelText(/sign-in code/i) as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(input, "123456");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: /send code/i }).click();
+    });
+
+    await waitFor(() => {
+      const posted = fetchMock.mock.calls.find((call) =>
+        String(call[0]).includes("/api/session/challenge/answer"),
+      );
+      expect(posted).toBeTruthy();
+      expect((posted![1] as RequestInit).method).toBe("POST");
+      expect(JSON.parse(String((posted![1] as RequestInit).body))).toEqual({
+        code: "123456",
+      });
+      // The token comes from the snapshot. Without it the server's hook refuses the
+      // request and the form fails with a bare `forbidden`.
+      const headers = (posted![1] as RequestInit).headers as Record<string, string>;
+      expect(headers["X-CSRF-Token"]).toBe(SIGNED_IN.csrfToken);
+    });
+  });
+
+  it("drops the prompt on challenge-seen, so a second tab stops showing an input", async () => {
+    const { source } = await renderWithStream();
+    feed(
+      source,
+      frame("challenge", { kind: "code", label: "", number: null, expiresAt: null }, "64"),
+    );
+    expect(screen.getByLabelText(/sign-in code/i)).toBeTruthy();
+
+    // `challenge-seen` says accepted, not correct — only the login can know that, and
+    // it says so on this same stream. So this clears the prompt and nothing else: a
+    // wrong code still has to come back as a failure rather than as silence.
+    feed(source, frame("challenge-seen", {}, "65"));
+
+    expect(screen.queryByLabelText(/sign-in code/i)).toBeNull();
+  });
+});

@@ -26,6 +26,11 @@ export const EVENT_TYPES = [
   "login-started",
   "challenge",
   "challenge-expired",
+  // The api's own event, not the runner's: a typed code was accepted onto a pending
+  // prompt. Next to the two it is about on purpose — the api inserts it at the same
+  // index and this list is pinned with an order-sensitive `toEqual`, so the position
+  // is load-bearing rather than cosmetic.
+  "challenge-seen",
   "login-success",
   "login-failed",
   "auth-expired",

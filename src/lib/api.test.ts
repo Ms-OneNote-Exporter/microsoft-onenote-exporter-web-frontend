@@ -203,3 +203,98 @@ describe("T-A4: API_ORIGIN is an exact origin", () => {
     expect(API_ORIGIN).toMatch(/^https?:\/\/[^/?#]+$/);
   });
 });
+
+describe("the challenge-answer route", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("posts the code to the api origin with the CSRF header", async () => {
+    const spy = stubFetch(() => ok(undefined));
+
+    await api.answerChallenge("123456", TOKEN);
+
+    const [url, init] = spy.mock.calls[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/session/challenge/answer`);
+    expect(init.method).toBe("POST");
+    // Required by the server's `onRequest` hook on every mutating route. A client
+    // that omitted it would render a form whose submit fails with a bare `forbidden`
+    // and no field pointing at the cause.
+    expect((init.headers as Record<string, string>)["X-CSRF-Token"]).toBe(TOKEN);
+  });
+
+  it("sends the code as JSON, unlike the credential", async () => {
+    const spy = stubFetch(() => ok(undefined));
+
+    await api.answerChallenge("123456", TOKEN);
+
+    const [, init] = spy.mock.calls[0]!;
+    // The distinction is deliberate and is not arbitrary: the credential route's rule
+    // is that a password must arrive byte-identical, and the framing, the cap and the
+    // stream above it all exist to protect that. A six-digit code is not a credential
+    // the browser is handling, and the server checks its shape itself.
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe(
+      "application/json",
+    );
+    expect(JSON.parse(init.body as string)).toEqual({ code: "123456" });
+  });
+
+  it("sends the code as typed rather than trimming it", async () => {
+    const spy = stubFetch(() => ok(undefined));
+
+    await api.answerChallenge(" 123456 ", TOKEN);
+
+    const [, init] = spy.mock.calls[0]!;
+    expect(JSON.parse(init.body as string)).toEqual({ code: " 123456 " });
+  });
+
+  it("includes credentials and forbids caching, like every mutating call", async () => {
+    const spy = stubFetch(() => ok(undefined));
+
+    await api.answerChallenge("123456", TOKEN);
+
+    const [, init] = spy.mock.calls[0]!;
+    // `SameSite=None` means the session cookie only travels when credentials are
+    // explicitly included — and without it every answer here is a 401.
+    expect(init.credentials).toBe("include");
+    expect(init.cache).toBe("no-store");
+  });
+
+  it("does not retry", async () => {
+    const spy = stubFetch(() => ok(undefined));
+
+    await api.answerChallenge("123456", TOKEN);
+
+    // One submission, one attempt. The runner resolves one prompt, so a replay would
+    // answer nothing — or, worse, a prompt that has since been reissued.
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a refusal as an ApiError carrying the server's reason", async () => {
+    // 409 is the one the frontend branches on: "nothing is waiting for that code" is
+    // a different situation from a wrong code, and `reason` is what tells them apart.
+    stubFetch(
+      () =>
+        ({
+          ok: false,
+          status: 409,
+          json: async () => ({
+            error: "the runner is not ready yet",
+            reason: "not-ready:conflict",
+          }),
+        }) as unknown as Response,
+    );
+
+    const err = await api.answerChallenge("123456", TOKEN).catch((e) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).reason).toBe("not-ready:conflict");
+  });
+
+  it("takes the CSRF token as a required parameter, so a call site cannot forget it", async () => {
+    // Structural, not behavioural: a signature change that made it optional would
+    // compile at every call site and fail at runtime against the server's hook.
+    expect(api.answerChallenge.length).toBe(2);
+  });
+});

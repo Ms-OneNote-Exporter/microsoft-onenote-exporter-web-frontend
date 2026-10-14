@@ -14,6 +14,7 @@ import { describeFailure } from "./lib/failures";
 import { parseNotebooks, readAuthState } from "./lib/notebooks-event";
 import { useEventStream } from "./lib/useEventStream";
 import { Consent } from "./pages/Consent";
+import { ChallengeAnswer } from "./pages/ChallengeAnswer";
 import { Credential } from "./pages/Credential";
 import { NotebookPicker, type LogLine } from "./pages/NotebookPicker";
 
@@ -419,6 +420,18 @@ export function App() {
           setChallenge(null);
           break;
 
+        case "challenge-seen":
+          // The prompt is answered — by this tab, or by another one sharing the
+          // session. Dropping it is what stops a second tab sitting on an input for a
+          // code that has already been used.
+          //
+          // **It says accepted, not correct.** Only the login can know whether the
+          // code was the right one, and it says so on this same stream — as
+          // `login-failed`, or `login-success`. So this does not touch the view: a
+          // wrong code still has to come back as a failure rather than as silence.
+          setChallenge(null);
+          break;
+
         case "auth-state":
           // The api emits `auth-state: {state: "authenticating"}` immediately
           // before it starts a listing. Recorded rather than merely refreshed,
@@ -560,35 +573,57 @@ export function App() {
             `parseChallenge` used to read `{id, kind, expiresAt}` while the api
             sends `{kind, label, number, expiresAt}`, so the number arrived as
             nothing and this notice was advice the user could not act on.
+
+            ## A `code` challenge gets an input, not a notice
+
+            **This notice is the whole of what a typed code used to be given**, and
+            the code they were holding was never asked for: the notice said "follow
+            the prompt on your phone", the api answered the challenge with
+            `login-failed {reason: "challenge-not-supported"}`, and an account with
+            a perfectly good password was told it did not work.
+
+            So a `code` challenge renders `ChallengeAnswer` above instead — an input,
+            a countdown from the challenge's own expiry, and the submit that reaches
+            `POST /api/session/challenge/answer`. A phone-approval challenge keeps
+            this notice, because there is nothing to type: the user acts on their own
+            device and the only thing this page owes them is the number.
           */}
-          {challenge && view !== "credential" && (
-            <section className="notice" role="status" aria-live="polite">
-              <p>
-                <strong>Your account needs another check.</strong>{" "}
-                {isPhoneApproval(challenge) ? (
-                  <>
-                    Approve the prompt in your phone, and check it matches this
-                    number:
-                  </>
-                ) : challenge.label ? (
-                  challenge.label
-                ) : (
-                  "Follow the prompt on your phone to finish signing in."
-                )}
-              </p>
-              {isPhoneApproval(challenge) && (
-                // The digits as printed. Rendered verbatim and never reformatted,
-                // because the user is comparing them by eye against their phone.
-                <p className="mfa-number" aria-label="number to match">
-                  {challenge.number}
+          {challenge &&
+            view !== "credential" &&
+            (challenge.kind === "code" ? (
+              <ChallengeAnswer
+                challenge={challenge}
+                submit={(code) => api.answerChallenge(code, csrfToken ?? "")}
+                onAnswered={() => setChallenge(null)}
+              />
+            ) : (
+              <section className="notice" role="status" aria-live="polite">
+                <p>
+                  <strong>Your account needs another check.</strong>{" "}
+                  {isPhoneApproval(challenge) ? (
+                    <>
+                      Approve the prompt in your phone, and check it matches this
+                      number:
+                    </>
+                  ) : challenge.label ? (
+                    challenge.label
+                  ) : (
+                    "Follow the prompt on your phone to finish signing in."
+                  )}
                 </p>
-              )}
-              <p className="fineprint">
-                This page cannot approve it for you, and the request expires on its
-                own. Leave this tab open until it does.
-              </p>
-            </section>
-          )}
+                {isPhoneApproval(challenge) && (
+                  // The digits as printed. Rendered verbatim and never reformatted,
+                  // because the user is comparing them by eye against their phone.
+                  <p className="mfa-number" aria-label="number to match">
+                    {challenge.number}
+                  </p>
+                )}
+                <p className="fineprint">
+                  This page cannot approve it for you, and the request expires on its
+                  own. Leave this tab open until it does.
+                </p>
+              </section>
+            ))}
 
           {view === "consent" && (
             <Consent
