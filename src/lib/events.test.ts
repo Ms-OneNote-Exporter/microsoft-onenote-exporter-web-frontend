@@ -373,6 +373,161 @@ describe("teardown", () => {
 
     expect(FakeEventSource.instances).toHaveLength(1);
   });
+
+  it("does not reconnect from the liveness timer once closed", () => {
+    vi.useFakeTimers();
+    const close = openEventStream({ onEvent: () => {} });
+    FakeEventSource.last().emitOpen();
+
+    close();
+    vi.advanceTimersByTime(120_000);
+
+    // The same leak as the line above, from the other teardown path: a timer
+    // that outlives the stream fires and opens an `EventSource` for a page that
+    // has gone. One per unmount, for nothing.
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+});
+
+/**
+ * ## Liveness: the stream that dies without saying so
+ *
+ * `onerror` is not enough. When a stream dies the way real ones die — a laptop
+ * asleep past the NAT's UDP timeout, a handover to another interface — the
+ * socket is not closed, no `close` reaches either end, and `EventSource` sits in
+ * `OPEN` forever. Nothing is thrown, nothing is dispatched, nothing appears in
+ * the console. The user watches a progress bar that has stopped moving and has
+ * no way to tell it from one that is merely quiet.
+ *
+ * So the client insists on hearing something: the api emits a named `keepalive`
+ * event every 15 s, and silence for three of those periods is treated as death.
+ */
+describe("liveness", () => {
+  /** Transcribed from `emitKeepalive()` in `api/src/sse.ts`. */
+  const KEEPALIVE_FRAME = "event: keepalive\ndata: {}\n\n";
+
+  it("reconnects when no frame arrives inside the timeout", () => {
+    vi.useFakeTimers();
+    const states: string[] = [];
+    openEventStream({ onEvent: () => {}, onState: (s) => states.push(s) });
+    const first = FakeEventSource.last();
+    first.emitOpen();
+
+    // One keepalive period is not evidence of anything: the api sends one of
+    // those every 15 s, so a stream that has said nothing for that long is
+    // merely early. A timeout below the keepalive would kill a healthy stream
+    // every time.
+    vi.advanceTimersByTime(15_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(first.closed).toBe(false);
+
+    // Three unanswered ones are.
+    vi.advanceTimersByTime(30_000);
+    expect(first.closed).toBe(true);
+    // Reported like any other reconnect: the ring buffer replays what was
+    // missed, so this is a pause, not a gap in the data.
+    expect(states).toContain("replaying");
+
+    vi.advanceTimersByTime(1_000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    // A new stream, and `T-S4` on it: the flag is not a property of the page.
+    expect(FakeEventSource.last().options?.withCredentials).toBe(true);
+    // …and it can hear again.
+    FakeEventSource.last().emitOpen();
+    vi.advanceTimersByTime(30_000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  it("does not start counting before the stream opens", () => {
+    vi.useFakeTimers();
+    openEventStream({ onEvent: () => {} });
+    const first = FakeEventSource.last();
+
+    // A connect that has not answered yet is not a dead stream — a slow TLS
+    // handshake or a cold backend must not be mistaken for a dead one. The
+    // browser's own `error` covers a connect that genuinely fails.
+    vi.advanceTimersByTime(120_000);
+
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(first.closed).toBe(false);
+  });
+
+  it("counts a keepalive frame as proof of life and forwards nothing", () => {
+    vi.useFakeTimers();
+    const seen: { id: string; event: string; data: unknown }[] = [];
+    openEventStream({ onEvent: (id, event, data) => seen.push({ id, event, data }) });
+    const source = FakeEventSource.last();
+    source.emitOpen();
+
+    // Four keepalive periods, a frame every 20 s, so the stream is never silent
+    // for as long as the timeout.
+    for (let elapsed = 0; elapsed < 80_000; elapsed += 20_000) {
+      vi.advanceTimersByTime(20_000);
+      source.feed(KEEPALIVE_FRAME);
+    }
+
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(source.closed).toBe(false);
+    // And none of them reached the consumer. `useEventStream` calls `setLast` on
+    // every event it is handed, so forwarding these would be a React re-render
+    // every 15 s for the life of the page, carrying nothing.
+    expect(seen).toEqual([]);
+  });
+
+  it("counts any frame as proof of life, not only a keepalive", () => {
+    vi.useFakeTimers();
+    const seen: string[] = [];
+    openEventStream({ onEvent: (_id, event) => seen.push(event) });
+    const source = FakeEventSource.last();
+    source.emitOpen();
+
+    vi.advanceTimersByTime(30_000);
+    source.feed(NOTEBOOKS_LISTED_FRAME);
+    vi.advanceTimersByTime(30_000);
+
+    // The event itself still lands, and the quiet stretch either side of it does
+    // not add up to a dead stream.
+    expect(seen).toEqual(["notebooks-listed"]);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it("counts a frame it cannot parse as proof of life", () => {
+    vi.useFakeTimers();
+    const seen: unknown[] = [];
+    openEventStream({ onEvent: (_id, _event, data) => seen.push(data) });
+    const source = FakeEventSource.last();
+    source.emitOpen();
+
+    vi.advanceTimersByTime(30_000);
+    source.feed('event: keepalive\ndata: {not json\n\n');
+    vi.advanceTimersByTime(30_000);
+
+    // The bytes arrived, and that is the only thing this timer measures.
+    // Arming it after the parse instead would make the api's payload shape
+    // load-bearing for whether a stream is considered alive.
+    expect(seen).toEqual([]);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it("schedules one reconnect when an error and a dead stream race", () => {
+    vi.useFakeTimers();
+    openEventStream({ onEvent: () => {} });
+    const first = FakeEventSource.last();
+    first.emitOpen();
+
+    // The stream errors 40 s in, five seconds short of the liveness timeout. If
+    // `onerror` left the liveness timer armed it would fire afterwards and open
+    // a second `EventSource` alongside the one already being replaced — which is
+    // doubled events from two live streams, and a hub subscriber per stray.
+    vi.advanceTimersByTime(40_000);
+    first.emitError();
+    vi.advanceTimersByTime(10_000);
+
+    // Past the 45 s deadline either way, so a surviving liveness timer would
+    // have fired and opened a third stream by now.
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(first.closed).toBe(true);
+  });
 });
 
 describe("named events: what the api actually writes", () => {
