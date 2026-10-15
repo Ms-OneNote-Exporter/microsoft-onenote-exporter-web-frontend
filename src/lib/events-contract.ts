@@ -16,9 +16,15 @@
  * instead of reading the other side. Both are fixed by transcribing rather than
  * inferring.
  *
- * `keepalive` is listed for completeness but never arrives — the api sends it as
- * an SSE comment, which `EventSource` does not parse, so there is nothing to
- * handle. `snapshot` is the restore event and is a whole `SessionSnapshot`.
+ * `keepalive` **does** arrive, and that is the point of it: the api writes a
+ * named `keepalive` frame with a non-empty `data: {}` line every 15 s, which is
+ * the only way a browser can tell a live stream from one that died without a
+ * close. `events.ts` uses it to reset a liveness timer and then swallows it — it
+ * is transport-level and carries no application meaning, so forwarding it would
+ * mean a React re-render every 15 s. It is still listed here because the
+ * listener has to be registered for the frame to be dispatched to it at all.
+ *
+ * `snapshot` is the restore event and is a whole `SessionSnapshot`.
  */
 export const EVENT_TYPES = [
   "session-status",
