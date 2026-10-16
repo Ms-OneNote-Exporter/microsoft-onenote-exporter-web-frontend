@@ -11,6 +11,14 @@
  * present and correctly shaped, so a rename or a moved field on the api side
  * fails here rather than on a user's screen.
  *
+ * Re-captured 2026-10-16 from `one-backend.phttp.com` (build `544f19e`), by the
+ * procedure the header above describes: a throwaway GUID and secret, one
+ * `POST /api/session`, then `GET /api/session/status` with the cookie it set.
+ * Re-captured rather than hand-edited because the previous capture (2026-10-06)
+ * predated `export.failed` and did not carry it — and `parseSessionStatus` reads
+ * that key opportunistically, so the omission parsed cleanly and stayed
+ * invisible to every test here. That is the file's own premise biting back.
+ *
  * The values are from a throwaway session created for the capture, so nothing
  * here is a live credential.
  */
@@ -20,12 +28,12 @@ import { parseSessionStatus } from "./session";
 /** Verbatim from the live endpoint, with the volatile values left intact. */
 const REAL_STATUS = {
   protocol: 3,
-  serverTime: "2026-10-06T14:40:59.070Z",
+  serverTime: "2026-10-16T15:48:17.148Z",
   session: {
     state: "created",
-    createdAt: "2026-10-06T14:40:49.017Z",
-    expiresAt: "2026-10-07T02:40:49.017Z",
-    idleExpiresAt: "2026-10-06T14:40:49.017Z",
+    createdAt: "2026-10-16T15:48:17.119Z",
+    expiresAt: "2026-10-17T03:48:17.119Z",
+    idleExpiresAt: "2026-10-16T15:48:17.119Z",
   },
   auth: { state: "none", lastCheckedAt: null },
   notebooks: { state: "idle", items: [] },
@@ -36,6 +44,7 @@ const REAL_STATUS = {
     id: null,
     notebook: null,
     progress: null,
+    failed: null,
     startedAt: null,
     finishedAt: null,
   },
@@ -45,7 +54,7 @@ const REAL_STATUS = {
     downloadUrl: null,
     fileName: null,
   },
-  csrfToken: "YhACOr3pdXBsYurwbemI_EpYMor2GhMEjEWlLhsqDCk",
+  csrfToken: "u6XPj48XA2AawFQWgrVsrHnZ3YVzwsIY9qwmZU5VrUs",
 } as const;
 
 describe("a real snapshot from a live backend", () => {
@@ -76,5 +85,15 @@ describe("a real snapshot from a live backend", () => {
     if (!result.ok) return;
     expect("error" in REAL_STATUS.export).toBe(true);
     expect(result.value.export).toBeNull();
+  });
+
+  it("carries export.failed, which buildSnapshot writes on every snapshot", () => {
+    // The same reasoning as `error` above, and the reason this file had to be
+    // re-captured rather than left alone. The api added `failed` after the
+    // 2026-10-06 capture, and the old payload did not have it — so the key the
+    // parser reads was absent, and because the parser reads it opportunistically
+    // the suite stayed green the whole time.
+    expect("failed" in REAL_STATUS.export).toBe(true);
+    expect(REAL_STATUS.export.failed).toBeNull();
   });
 });
