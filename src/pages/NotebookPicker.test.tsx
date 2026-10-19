@@ -36,7 +36,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 
 import { NotebookPicker } from "./NotebookPicker";
-import type { NotebookList } from "../lib/session";
+import type { AuthState, NotebookList } from "../lib/session";
 
 afterEach(() => cleanup());
 
@@ -47,8 +47,10 @@ const LISTING: NotebookList = { state: "listing", items: [] };
 function renderPicker(
   overrides: Partial<{
     signedIn: boolean;
+    authState: AuthState;
     notebooks: NotebookList;
     listingPending: boolean;
+    challengeActive: boolean;
     onList: () => void;
   }> = {},
 ) {
@@ -57,6 +59,8 @@ function renderPicker(
     <NotebookPicker
       notebooks={overrides.notebooks ?? IDLE}
       signedIn={overrides.signedIn ?? true}
+      authState={overrides.authState ?? "none"}
+      challengeActive={overrides.challengeActive ?? false}
       // `null`, not a stubbed object: a truthy `running` makes the component render
       // `ExportProgress` instead of the chooser, which is a silent way to write a test
       // that asserts on the wrong subtree.
@@ -70,11 +74,13 @@ function renderPicker(
     />,
   );
   // Every label the button takes: "List my notebooks", "Sign in to list",
-  // "Asking the service…", "Listing…". Querying by one of them would make each test
+  // "Asking the service…", "Listing…", and "Signing in to Microsoft…"
+  // when authState is "authenticating". Querying by one of them would make each test
   // depend on a label it is not testing, and fail on the states it is.
+  // The regex now includes "signing in" to match the signing-in label.
   return {
     onList,
-    button: screen.getByRole("button", { name: /list|sign in|asking/i }),
+    button: screen.getByRole("button", { name: /list|signing in|sign in|asking/i }),
   };
 }
 
@@ -157,5 +163,83 @@ describe("a signed-in session", () => {
     const { button } = renderPicker({ signedIn: true, notebooks: LOADED });
 
     expect(isDisabled(button)).toBe(false);
+  });
+});
+
+/**
+ * While a Microsoft sign-in is in progress (`authState: "authenticating"`), show a
+ * visible notice so the user doesn't think the app is stuck.
+ */
+describe("while a sign-in is in progress", () => {
+  it("shows a signing-in notice", () => {
+    // authState: "authenticating", signedIn: false, challengeActive: false
+    renderPicker({ authState: "authenticating", signedIn: false, challengeActive: false });
+
+    const notice = screen.getByRole("status", { name: /signing in to microsoft/i });
+    expect(notice).toBeDefined();
+  });
+
+  it("says on the button that the sign-in is running", () => {
+    // The control states the truth rather than offering a click that cannot
+    // succeed. The label is what the user reads while waiting.
+    const { button } = renderPicker({
+      authState: "authenticating",
+      signedIn: false,
+      challengeActive: false,
+    });
+
+    expect(button.textContent).toMatch(/signing in to microsoft/i);
+  });
+
+  it("still refuses the click, because listing cannot succeed yet", () => {
+    // The 409 trap, closed.
+    //
+    // The button says "Signing in to Microsoft…" and stays **disabled**. A live
+    // button here could only ever produce the refusal "Still signing in — the
+    // service is not ready to list notebooks yet", so making it live during the
+    // sign-in would re-open the trap the `!signedIn` gate exists to close.
+    //
+    // This is pinned separately from the label because the two were once changed
+    // together by accident, and the label test stayed green while the button
+    // became live.
+    const { button } = renderPicker({
+      authState: "authenticating",
+      signedIn: false,
+      challengeActive: false,
+    });
+
+    expect(isDisabled(button)).toBe(true);
+  });
+
+  it("does not show the misleading fineprint about sending password", () => {
+    // In this state, the fineprint that says "Send your password on the
+    // previous step first" should be hidden because the user is already in
+    // the process of signing in.
+    renderPicker({ authState: "authenticating", signedIn: false, challengeActive: false });
+
+    expect(screen.queryByText(/send your password on the previous step/i)).toBeNull();
+  });
+
+  it("when signed in, the notice is absent", () => {
+    // authState: "valid", signedIn: true — the user is already in
+    renderPicker({ authState: "valid", signedIn: true });
+
+    expect(screen.queryByRole("status", { name: /signing in to microsoft/i })).toBeNull();
+  });
+
+  it("when not signed in and not authenticating, the button label is 'Sign in to list' and the fineprint is present", () => {
+    // authState: "none", signedIn: false — this is the plain pre-sign-in state
+    const { button } = renderPicker({ authState: "none", signedIn: false, challengeActive: false });
+
+    expect(button.textContent).toMatch(/sign in to list/i);
+    expect(screen.getByText(/send your password on the previous step/i)).toBeDefined();
+  });
+
+  it("when a challenge is active, the generic notice is suppressed", () => {
+    // An MFA challenge is outstanding — App.tsx shows the actionable phone-approval
+    // notice itself, so the generic "hold this tab open" notice must be suppressed.
+    renderPicker({ authState: "authenticating", signedIn: false, challengeActive: true });
+
+    expect(screen.queryByRole("status", { name: /signing in to microsoft/i })).toBeNull();
   });
 });

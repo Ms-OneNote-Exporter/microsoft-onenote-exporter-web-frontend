@@ -10,9 +10,21 @@
  *
  * PLAN-v2 §9.2: names are clickable to fill the export block, greyed until the
  * credential has been accepted.
+ *
+ * ## Why we don't use `log-block` for the sign-in progress
+ *
+ * The `log-block` is fed ONLY by `listing-log`/`export-log` frames (see `App.tsx`
+ * `onStreamEvent`, the `case "export-log":` and `case "listing-log":` arms). The
+ * runner's credential handler's `forward()` (backend `runner/src/index.ts` ~378-409)
+ * handles only `challenge`/`challenge-expired`/`challenge-seen`/`login-result` and
+ * `default: break`s everything else, so `@msout/microsoft-webauth` login-progress
+ * events are NEVER forwarded to the SSE stream. Driving the indicator off
+ * `auth_state` (already-parsed snapshot field) is the in-keeping, frontend-only
+ * shape.
  */
 import { useEffect, useRef, useState } from "react";
 import type {
+  AuthState,
   ExportFailures,
   ExportProgress,
   ExportState,
@@ -40,6 +52,10 @@ export interface NotebookPickerProps {
   notebooks: NotebookList;
   /** False until the credential has been accepted. */
   signedIn: boolean;
+  /** Current authentication state. */
+  authState: AuthState;
+  /** Whether an MFA challenge is currently outstanding. */
+  challengeActive?: boolean;
   export: RunningExport | null;
   streamState: "connecting" | "open" | "replaying" | "closed";
   /**
@@ -82,6 +98,8 @@ export interface NotebookPickerProps {
 export function NotebookPicker({
   notebooks,
   signedIn,
+  authState,
+  challengeActive = false,
   export: running,
   streamState,
   actionError,
@@ -132,8 +150,28 @@ export function NotebookPicker({
     );
   }
 
+  // A signing-in indicator: show while auth_state is "authenticating", the user
+  // is not yet signed in, and there's no active MFA challenge (that gets its own
+  // notice in App.tsx that supersedes this one).
+  const signingIn = authState === "authenticating" && !signedIn && !challengeActive;
+  // Note: the && !signedIn is intentionally redundant (authState==="authenticating"
+  // already implies !signedIn); defensive clarity per project style.
+
   return (
     <>
+      {signingIn && (
+        <section
+          className="notice"
+          role="status"
+          aria-live="polite"
+          aria-label="Signing in to Microsoft"
+        >
+          <p>
+            Signing in to Microsoft… a headless sign-in runs in an isolated container
+            and can take a minute. Hold this tab open.
+          </p>
+        </section>
+      )}
       <LogBlock lines={logLines} dropped={droppedLogLines} />
 
       {/* Kept above the chooser rather than replaced by it: the reference and the
@@ -185,19 +223,29 @@ export function NotebookPicker({
         separately from `notebooks.state`, and the distinction is the whole thing:
         `notebooks.state === "idle"` is true both before signing in and after, so it
         cannot tell the user to wait.
+
+        **The label changes while signing in; the disabled state does not.** The
+        button says "Signing in to Microsoft…" so the control states the truth, and
+        it stays disabled for exactly the reason it was disabled before: listing
+        cannot succeed until the sign-in finishes, so a click could only ever
+        produce the 409 above. Making it live during the sign-in would re-open the
+        trap this gate exists to close — a live button whose only possible outcome
+        is a refusal, which is what the paragraph above this one is about.
       */}
       <button
         type="button"
         onClick={onList}
         disabled={!signedIn || listingPending || view.state === "listing"}
       >
-        {!signedIn
-          ? "Sign in to list"
-          : listingPending
-            ? "Asking the service…"
-            : view.state === "listing"
-              ? "Listing…"
-              : "List my notebooks"}
+        {signingIn
+          ? "Signing in to Microsoft…"
+          : !signedIn
+            ? "Sign in to list"
+            : listingPending
+              ? "Asking the service…"
+              : view.state === "listing"
+                ? "Listing…"
+                : "List my notebooks"}
       </button>
 
       {actionError && (
@@ -230,7 +278,7 @@ export function NotebookPicker({
         Export {selected ? `“${selected}”` : ""}
       </button>
 
-      {!signedIn && (
+      {!signedIn && !signingIn && (
         <p className="fineprint">
           Exporting needs a signed-in session. Send your password on the
           previous step first.

@@ -75,6 +75,8 @@ function renderPicker(
     <NotebookPicker
       notebooks={overrides.notebooks ?? LOADED}
       signedIn={overrides.signedIn ?? true}
+      authState="none"
+      challengeActive={false}
       export={running}
       streamState="open"
       listingPending={false}

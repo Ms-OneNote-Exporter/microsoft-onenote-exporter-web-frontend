@@ -661,6 +661,8 @@ export function App() {
             <NotebookPicker
               notebooks={status.notebooks}
               signedIn={status.signedIn}
+              authState={status.authState}
+              challengeActive={challenge !== null}
               export={status.export}
               streamState={stream.state}
               // One slot for the message, cleared on the next attempt rather
