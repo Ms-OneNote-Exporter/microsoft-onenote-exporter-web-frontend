@@ -13,7 +13,7 @@
  * route existence — see the Status section of the README.
  */
 import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import { act, render, screen, cleanup, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, cleanup, waitFor } from "@testing-library/react";
 import { App } from "./App";
 import { EXPECTED_PROTOCOL } from "./lib/protocol";
 import { FRONTEND_VERSION } from "./lib/version";
@@ -753,5 +753,306 @@ describe("an outstanding MFA challenge", () => {
     feed(source, frame("challenge-seen", {}, "65"));
 
     expect(screen.queryByLabelText(/sign-in code/i)).toBeNull();
+  });
+});
+/**
+ * The session boundary: what belonged to the previous session must not outlive it.
+ *
+ * ## The bug this file exists for
+ *
+ * The log block and the frame-id set are properties of **one session**, and
+ * neither was reset when the session ended. So after erasing a session and
+ * creating another, the page showed the previous session's output — and, worse,
+ * showed **none** of the new session's own, because the api's frame ids are per
+ * session and a new session's hub restarts at id 1: the new session's frames
+ * carried ids the old session had already used, and the client's replay dedupe
+ * threw them away as replays.
+ *
+ * The second half is why the report read *"instead of a fresh export"* rather
+ * than *"with extra lines at the top"*: the new session produced **nothing** on
+ * screen, and the block was left showing the old session's lines.
+ *
+ * The api's frame ids restart per session, and that was proven on the deployed
+ * host rather than inferred: two different sessions both emitted frame id `2`.
+ *
+ * ## What the reset is, and what it is not
+ *
+ * There is one reset, and three places that call it: the api's 401 (the
+ * server's own boundary signal), the local Erase action, and the creation of a
+ * new session. They are **alternatives to one another** — whichever fires first
+ * clears the state — so no single call site can be pinned on its own. What the
+ * cases below pin is the *mechanism*: remove the reset and they all go red.
+ *
+ * They drive the real `App` with real bytes on a fake source, because the
+ * handler only runs because the transport registered a listener for the name.
+ */
+describe("the session boundary", () => {
+  beforeEach(() => {
+    WireEventSource.instances = [];
+  });
+
+  /**
+   * The api, under the test's control.
+   *
+   * Every answer is a field the test can change between steps, because the whole
+   * point is the *sequence*: a session that exists, then one that does not, then
+   * one that does again.
+   */
+  function stubBoundaryApi() {
+    const api = {
+      status: { code: 200, body: SIGNED_IN as unknown },
+      erase: { code: 200, body: { erased: true } as unknown },
+      statusCalls: 0,
+      eraseCalls: 0,
+      createCalls: 0,
+      held: [] as Array<() => void>,
+      holdNextStatus: false,
+    };
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/api/public/version")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ protocol: EXPECTED_PROTOCOL, build: "abc123" }),
+        } as unknown as Response);
+      }
+      if (url.includes("/api/session/erase")) {
+        api.eraseCalls += 1;
+        return Promise.resolve({
+          ok: api.erase.code < 400,
+          status: api.erase.code,
+          json: async () => api.erase.body,
+        } as unknown as Response);
+      }
+      if (url.includes("/api/session/status")) {
+        api.statusCalls += 1;
+        // The body is captured **now**, not when the response is finally read.
+        // A real server answers with the state as it was when the request was
+        // made, and a mock that reads the field lazily would answer a held
+        // request with whatever the test set afterwards — which is exactly the
+        // case the held request exists to test.
+        const code = api.status.code;
+        const body = api.status.body;
+        const answer = {
+          ok: code < 400,
+          status: code,
+          json: async () => body,
+        } as unknown as Response;
+        if (api.holdNextStatus) {
+          api.holdNextStatus = false;
+          return new Promise((resolve) => {
+            api.held.push(() => resolve(answer));
+          });
+        }
+        return Promise.resolve(answer);
+      }
+      if (url.includes("/api/session/credential")) {
+        return Promise.resolve({
+          ok: true,
+          status: 202,
+          json: async () => ({ accepted: true }),
+        } as unknown as Response);
+      }
+      if (url.includes("/api/session")) {
+        api.createCalls += 1;
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: async () => ({ protocol: EXPECTED_PROTOCOL, csrfToken: "csrf-token" }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as unknown as Response);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("EventSource", WireEventSource);
+    return api;
+  }
+
+  /** Bytes onto the wire, inside `act` because they re-render the page. */
+  function feed(source: WireEventSource, bytes: string) {
+    act(() => source.feed(bytes));
+  }
+
+  function block(): HTMLElement {
+    return screen.getByTestId("log-block");
+  }
+
+  /** The page a session that exists and is signed in renders. */
+  async function renderSignedIn() {
+    render(<App />);
+    await screen.findByRole("heading", { name: /choose a notebook/i });
+    return WireEventSource.last();
+  }
+
+  /**
+   * Create a session, which is what a user does after erasing one.
+   *
+   * The status route must answer 200 for the page to land on the export view
+   * again — the log block is rendered only there, and therefore that is the only
+   * place its emptiness can be seen. The *body* is the caller's, so a test can
+   * choose what the new session's snapshot says.
+   */
+  async function createSession(api: ReturnType<typeof stubBoundaryApi>, body: unknown = SIGNED_IN) {
+    api.status.code = 200;
+    api.status.body = body;
+    fireEvent.click(screen.getByRole("button", { name: /generate one for me/i }));
+    fireEvent.click(screen.getByRole("button", { name: /create session/i }));
+    await screen.findByRole("heading", { name: /choose a notebook/i });
+  }
+
+  it("does not carry the previous session's output into the next one", async () => {
+    const api = stubBoundaryApi();
+    const source = await renderSignedIn();
+
+    feed(source, frame("listing-log", { line: "Found 3 notebooks!", level: "INFO" }, "11"));
+    expect(block().textContent).toContain("Found 3 notebooks!");
+
+    // The session is erased. The api answers 401 for the snapshot afterwards,
+    // because the row is gone and the cookie expired.
+    api.status.code = 401;
+    api.status.body = { error: "unauthorised" };
+    fireEvent.click(screen.getByRole("button", { name: /erase this session/i }));
+    await screen.findByText(/before you sign in/i);
+
+    // And a new one.
+    await createSession(api);
+
+    // The block is on screen again, and it is **empty**. The previous session's
+    // output is not in it.
+    expect(block().textContent).not.toContain("Found 3 notebooks!");
+    expect(block().textContent).toMatch(/nothing has been logged yet/i);
+  });
+
+  it("shows the new session's own output, even when its frame id was the old one's", async () => {
+    const api = stubBoundaryApi();
+    const source = await renderSignedIn();
+
+    // The old session used frame id 11.
+    feed(source, frame("listing-log", { line: "Found 3 notebooks!", level: "INFO" }, "11"));
+    expect(block().textContent).toContain("Found 3 notebooks!");
+
+    api.status.code = 401;
+    api.status.body = { error: "unauthorised" };
+    fireEvent.click(screen.getByRole("button", { name: /erase this session/i }));
+    await screen.findByText(/before you sign in/i);
+    await createSession(api);
+
+    // The new session's hub restarts at id 1, so its frames carry ids the old
+    // session had already used. **This is the whole bug**: the dedupe set was
+    // never cleared, so these frames were thrown away as replays and the new
+    // session showed nothing at all.
+    const second = WireEventSource.last();
+    feed(second, frame("listing-log", { line: "Found 1 notebook!", level: "INFO" }, "11"));
+
+    expect(block().textContent).toContain("Found 1 notebook!");
+  });
+
+  it("drops a challenge that belonged to a session which is gone", async () => {
+    const api = stubBoundaryApi();
+    const source = await renderSignedIn();
+
+    // A phone-approval prompt, which renders the notice.
+    feed(source, frame("challenge", { kind: "push", number: "123456", label: "", expiresAt: null }, "12"));
+    expect(screen.getByText(/your account needs another check/i)).toBeTruthy();
+
+    // Another tab erased the session. The api announces it with a
+    // `session-status` frame, which triggers a refresh, which comes back 401.
+    api.status.code = 401;
+    api.status.body = { error: "unauthorised" };
+    feed(source, frame("session-status", { state: "erasing" }, "13"));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: /choose a notebook/i })).toBeNull(),
+    );
+    // The prompt is for a session that no longer exists. Leaving it on screen
+    // would ask the user to act on a Microsoft sign-in that is over — and the
+    // number to match would be a number for a session that is gone.
+    expect(screen.queryByText(/your account needs another check/i)).toBeNull();
+  });
+
+  it("does not let a snapshot that arrives after the boundary replace the new one", async () => {
+    const api = stubBoundaryApi();
+    const old = {
+      ...SIGNED_IN,
+      notebooks: { state: "loaded", items: ["Old notebook"] },
+    };
+    const fresh = {
+      ...SIGNED_IN,
+      notebooks: { state: "loaded", items: ["New notebook"] },
+    };
+    api.status.body = old;
+
+    const source = await renderSignedIn();
+    expect(screen.getByText("Old notebook")).toBeTruthy();
+
+    // A refresh goes out and is held open — it is the request that will answer
+    // with the *old* session's snapshot, long after the session it describes is
+    // gone.
+    api.holdNextStatus = true;
+    feed(source, frame("session-status", SIGNED_IN, "14"));
+
+    // The boundary, and a new session.
+    api.status.code = 401;
+    api.status.body = { error: "unauthorised" };
+    fireEvent.click(screen.getByRole("button", { name: /erase this session/i }));
+    await screen.findByText(/before you sign in/i);
+
+    api.status.body = fresh;
+    await createSession(api, fresh);
+    expect(screen.getByText("New notebook")).toBeTruthy();
+
+    // Now the held answer lands. It is about a session this page is no longer
+    // showing, so it must not be applied.
+    await act(async () => {
+      while (api.held.length > 0) api.held.shift()?.();
+    });
+
+    expect(screen.getByText("New notebook")).toBeTruthy();
+    expect(screen.queryByText("Old notebook")).toBeNull();
+  });
+
+  it("does not leave the erase's rejection unhandled", async () => {
+    const api = stubBoundaryApi();
+    await renderSignedIn();
+
+    // The erase fails. The row is deleted and the cookie expired anyway, so the
+    // session really is gone — but the call rejects, and the promise it is fired
+    // in is `void`ed, so an escaping rejection is an unhandled one.
+    api.erase.code = 500;
+    api.erase.body = { error: "erase_failed", failedAt: "aborted" };
+
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /erase this session/i }));
+      await screen.findByText(/before you sign in/i);
+      // Give the microtask queue a turn, so a rejection that was going to escape
+      // has escaped.
+      await act(async () => {
+        await Promise.resolve();
+      });
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+
+    expect(rejections).toEqual([]);
+  });
+
+  it("re-reads the snapshot when the stream reconnects, so a dead stream cannot strand the tab", async () => {
+    const api = stubBoundaryApi();
+    const source = await renderSignedIn();
+    const before = api.statusCalls;
+
+    // The transport's own reconnect path: the socket died. It schedules a
+    // reconnect and enters the `replaying` state, which is where the page
+    // notices that it has not heard from the service for a while.
+    act(() => source.onerror?.());
+
+    await waitFor(() => expect(api.statusCalls).toBeGreaterThan(before));
   });
 });

@@ -56,9 +56,9 @@ const MAX_LOG_LINES = 500;
  * (`api/src/config.ts`'s `sseBufferEvents`), and a reconnect replays from
  * `Last-Event-ID` — so a duplicate can only ever arrive from within that window.
  * Twice it is headroom; anything older cannot return because the ids are
- * monotonic for the life of the session. The bound is what stops the set
- * outliving every line it guards, which on a long export is the difference
- * between a fixed few kilobytes and a slow leak for the session's life.
+ * monotonic within a session. The bound is what stops the set outliving every
+ * line it guards, which on a long export is the difference between a fixed few
+ * kilobytes and a slow leak for the session's life.
  */
 const MAX_SEEN_FRAME_IDS = 1000;
 
@@ -139,6 +139,40 @@ export function App() {
   const listingRef = useRef(false);
 
   /**
+   * The generation of the session this page's view state belongs to.
+   *
+   * Bumped at every session boundary, and read by `refreshStatus` to know
+   * whether the answer it is holding is still about the session this page is
+   * showing. Without it, a refresh that was in flight when the boundary
+   * happened resolves afterwards and replaces the **new** session's snapshot
+   * with the old one's — the same class of leak as the log block, one layer
+   * down and quieter.
+   */
+  const sessionEpoch = useRef(0);
+
+  /**
+   * Forget everything that belonged to the previous session.
+   *
+   * The log block, the frame-id set, the listing flag, the outstanding
+   * challenge, the last action error and the snapshot itself are all
+   * **properties of one session**. They must not outlive it, and a new
+   * session's frames must not be mistaken for the old session's replays.
+   *
+   * `seenFrameIds` is declared further down, with the log block it belongs to;
+   * the reference is safe because this runs after the render that declared it.
+   */
+  const resetSessionState = useCallback(() => {
+    sessionEpoch.current += 1;
+    setLog({ lines: [], dropped: 0 });
+    seenFrameIds.current.clear();
+    listingRef.current = false;
+    setChallenge(null);
+    setActionError(null);
+    setStatus(null);
+    setStatusError(null);
+  }, []);
+
+  /**
    * Install the notebook list locally, counting the revision.
    *
    * Every write to `notebooks` goes through here. A write that bypasses it does
@@ -151,11 +185,22 @@ export function App() {
     setStatus((prev) => (prev ? { ...prev, notebooks } : prev));
   }, []);
 
+  // --- live updates ---------------------------------------------------------
+  //
+  // The stream is opened once a session exists. It carries the notebook list,
+  // the export state and the signed-in flag, so polling is not needed and a
+  // long export survives a reconnect via the server's ring buffer.
+  const sessionExists = status?.hasSession === true;
+
   const refreshStatus = useCallback(async () => {
     // Read *before* the await: this is what the request is about to be asked.
     const seqAtRequest = notebooksSeq.current;
+    // The same, for the session generation. A response that arrives after the
+    // session changed is about a session this page is no longer showing.
+    const epochAtRequest = sessionEpoch.current;
     try {
       const parsed = parseSessionStatus(await api.status());
+      if (epochAtRequest !== sessionEpoch.current) return;
       if (!parsed.ok) {
         // Surfaced, not absorbed. The previous parser defaulted every missing
         // field, so a total mismatch rendered a page that looked entirely normal
@@ -192,10 +237,18 @@ export function App() {
       if (parsed.value.notebooks.state !== "listing") listingRef.current = false;
       setStatusError(null);
     } catch (err) {
+      // The same guard as above, for the failure path: a 401 for a session that
+      // is no longer this page's must not reset the session that is.
+      if (epochAtRequest !== sessionEpoch.current) return;
       // A 401 is an *answer*, not a failure: the service has told us this visitor
       // has no session, which is the expected state for anyone who has not
       // started one. Showing an error for it put a red alert on the landing page
       // of every first-time visitor, found by loading the real deployed site.
+      //
+      // It is also **the session boundary**, and the most reliable one. The api
+      // announces a session's death with a `session-status` frame — and that
+      // announcement is what triggers the refresh which observes the 401 here.
+      // A tab that did not press Erase learns about it the same way.
       //
       // The reasoning that used to live here — "a status we cannot read is not
       // the same as no session, so do not claim there is no session" — is
@@ -204,8 +257,7 @@ export function App() {
       // existing session. Reading it correctly twice in one place is not the
       // same as reading it once correctly.
       if (err instanceof ApiError && err.status === 401) {
-        setStatus(null);
-        setStatusError(null);
+        resetSessionState();
         return;
       }
       setStatusError(
@@ -214,7 +266,7 @@ export function App() {
           : "The session state could not be read.",
       );
     }
-  }, []);
+  }, [resetSessionState]);
 
   useEffect(() => {
     if (!ready) return;
@@ -236,13 +288,6 @@ export function App() {
    */
   const csrfToken = status?.csrfToken ?? null;
   const missingToken = status?.hasSession === true && csrfToken === null;
-
-  // --- live updates ---------------------------------------------------------
-  //
-  // The stream is opened once a session exists. It carries the notebook list,
-  // the export state and the signed-in flag, so polling is not needed and a
-  // long export survives a reconnect via the server's ring buffer.
-  const sessionExists = status?.hasSession === true;
 
   // --- the runner's own output -----------------------------------------------
   //
@@ -270,6 +315,11 @@ export function App() {
    * (`runner/src/index.ts:232`), so a line the user has already seen can arrive
    * a second time, and a block that printed it twice reads as the work having
    * happened twice.
+   *
+   * **The set is cleared when a new session starts.** The api's frame ids are
+   * monotonic **within** a session, and a new session's hub restarts at 1. An id
+   * from a previous session therefore arrives as a "foreign" id and gets a fresh
+   * entry in this set.
    */
   const seenFrameIds = useRef(new Set<string>());
 
@@ -282,8 +332,9 @@ export function App() {
       if (seenFrameIds.current.has(frameId)) return;
       seenFrameIds.current.add(frameId);
       // Bounded, because the set outlives every line it guards. Ids are monotonic
-      // for the life of the session, so the only way an id returns is a replay,
-      // and a replay is bounded by the api's ring buffer — `sseBufferEvents: 500`
+      // **within** a session, and a new session's hub restarts at 1. An id from
+      // a previous session therefore arrives fresh and must not be in the dedupe
+      // set. A replay is bounded by the api's ring buffer — `sseBufferEvents: 500`
       // frames, configurable in `api/src/config.ts`. Keeping twice that is
       // headroom, and evicting the oldest is safe because a Set iterates in
       // insertion order and the oldest id is the one furthest beyond any replay.
@@ -307,10 +358,10 @@ export function App() {
    * A fresh block for a fresh run, which is what a terminal does when you start
    * a new command.
    *
-   * `seenFrameIds` is deliberately **not** cleared with it. The api's frame ids
-   * are monotonic for the life of the session, so an id from a previous run can
-   * never come back; emptying the set would only re-admit a replay of this run's
-   * own frames.
+   * `seenFrameIds` is cleared with it when a new session starts. The api's frame
+   * ids are monotonic **within** a session, and a new session's hub restarts at
+   * 1. An id from a previous session therefore arrives fresh and must not be in
+   * the dedupe set.
    */
   const clearLog = useCallback(() => {
     setLog({ lines: [], dropped: 0 });
@@ -461,7 +512,32 @@ export function App() {
     [refreshStatus, appendLogLine, clearLog],
   );
 
+  // --- live updates ---------------------------------------------------------
+  //
+  // The stream is opened once a session exists. It carries the notebook list,
+  // the export state and the signed-in flag, so polling is not needed and a
+  // long export survives a reconnect via the server's ring buffer.
   const stream = useEventStream(sessionExists, onStreamEvent);
+
+  /**
+   * Refresh the snapshot when the SSE stream reconnects.
+   *
+   * A stream that dies and comes back (drop, network change, api restart)
+   * enters the "replaying" state to catch up. A new session's hub restarts at
+   * id 1, so any previous `Last-Event-ID` is foreign and the api sends a
+   * snapshot. This hook triggers a `refreshStatus` on that reconnect so the
+   * view sees a refreshed snapshot. A 200 response leaves everything untouched;
+   * a 401 resets the per-session state.
+   *
+   * This is a *recovery* path: a stream that dies cannot strand a tab. The
+   * refresh is not a reset: only a 401 empties the log block.
+   */
+  useEffect(() => {
+    if (!ready) return;
+    if (sessionExists && stream.state === "replaying") {
+      void refreshStatus();
+    }
+  }, [ready, sessionExists, stream.state, refreshStatus]);
 
   // --- view selection -------------------------------------------------------
   //
@@ -485,15 +561,31 @@ export function App() {
   const onErase = useCallback(async () => {
     try {
       await api.erase(csrfToken ?? "");
+    } catch {
+      // A failed erase is swallowed, and that is a decision rather than an
+      // oversight.
+      //
+      // The session row is deleted and the cookie expired whether the server
+      // managed the container or not — the api expires the cookie in both
+      // branches, and the machine deletes the row last either way. So from the
+      // user's side the session **was** erased, and what is left over is
+      // server-side data the api has already logged. A visible message would
+      // say "the erase failed" about an erase that succeeded, which is the
+      // worse of the two.
+      //
+      // It is caught rather than left to escape: `api.erase` rejects on a
+      // non-2xx, and this promise is fired with `void`, so an escaping
+      // rejection would be an unhandled promise rejection in the console for
+      // every erase of a session that never signed in.
     } finally {
       // The local view resets even if the server call failed. Leaving a
       // credential form on screen after the user asked to erase is the worse
       // of the two.
-      setStatus(null);
+      resetSessionState();
       setView("consent");
       await refreshStatus();
     }
-  }, [refreshStatus, csrfToken]);
+  }, [resetSessionState, refreshStatus, csrfToken]);
 
   switch (boot.phase) {
     case "checking":
@@ -628,6 +720,10 @@ export function App() {
           {view === "consent" && (
             <Consent
               onStarted={() => {
+                // A new session exists, so everything that belonged to the old
+                // one is stale — including the log block, which would otherwise
+                // greet the new session with the old one's output.
+                resetSessionState();
                 setView("credential");
                 void refreshStatus();
               }}
