@@ -1055,4 +1055,89 @@ describe("the session boundary", () => {
 
     await waitFor(() => expect(api.statusCalls).toBeGreaterThan(before));
   });
+
+  /**
+   * F1: the page stays on the export view while a session is being erased.
+   *
+   * FALSIFICATION: with the reverted code (no erasing branch), when session.state
+   * is "erasing", hasSession is false and the view goes to "consent".
+   * This test expects the view to stay on "export", so it fails with the reverted code.
+   */
+  it("stays on the export view while a session is being erased", async () => {
+    const api = stubBoundaryApi();
+    const source = await renderSignedIn();
+
+    // The erase is in flight. The api answers with an erasing session.
+    api.status.body = {
+      ...SIGNED_IN,
+      session: { state: "erasing" },
+    };
+
+    // A session-status frame arrives with state "erasing".
+    const before = api.statusCalls;
+    feed(source, frame("session-status", api.status.body, "101"));
+
+    // **The refresh the frame triggered must have landed** before the
+    // assertions below. Without this wait they would be reading a screen that
+    // nothing has re-rendered, and the test would pass for the wrong reason —
+    // the view would still be "export" because the snapshot had not arrived
+    // yet, not because the fix held it there.
+    await waitFor(() => expect(api.statusCalls).toBeGreaterThan(before));
+
+    // With the fix, the view stays on "export": the session is still there, it
+    // is being erased, and the erase's response — which expires the cookie —
+    // has not landed yet. Without it, `hasSession` is false and the view goes
+    // to "consent", where the user can start a session whose cookie the
+    // erase's response will kill.
+    expect(screen.queryByRole("heading", { name: /choose a notebook/i })).toBeTruthy();
+    expect(screen.queryByText(/before you sign in/i)).toBeNull();
+  });
+
+  /**
+   * F3: when the status is cleared because the session ended, the page
+   * returns to the consent view.
+   */
+  it("returns to the consent view when the session is cleared", async () => {
+    const api = stubBoundaryApi();
+    const source = await renderSignedIn();
+
+    // The session is gone (401).
+    api.status.code = 401;
+    api.status.body = { error: "unauthorised" };
+    feed(source, frame("session-status", api.status.body, "102"));
+
+    await screen.findByRole("heading", { name: /before you sign in/i });
+    expect(screen.queryByRole("heading", { name: /choose a notebook/i })).toBeNull();
+  });
+
+  /**
+   * F4: creating a session does not bounce the user back to the consent page,
+   * and the view still reaches the credential form.
+   */
+  it("moves to the credential form when creating a session", async () => {
+    const api = stubBoundaryApi();
+    await renderSignedIn();
+
+    // The session is erased, which nulls the status.
+    api.status.code = 401;
+    api.status.body = { error: "unauthorised" };
+    fireEvent.click(screen.getByRole("button", { name: /erase this session/i }));
+    await screen.findByText(/before you sign in/i);
+
+    // Creating a new session. The status after creation has no auth yet
+    // (auth.state is not "valid" so signedIn is false).
+    api.status.code = 200;
+    api.status.body = {
+      ...SIGNED_IN,
+      auth: { state: "expired" }, // not "valid", so signedIn is false
+    };
+    fireEvent.click(screen.getByRole("button", { name: /generate one for me/i }));
+    fireEvent.click(screen.getByRole("button", { name: /create session/i }));
+
+    // The view should reach the credential form, not bounce back to consent.
+    await screen.findByRole("heading", { name: /sign in to microsoft/i });
+    expect(screen.getByLabelText(/account/i)).toBeTruthy();
+    expect(screen.getByLabelText(/password/i)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: /before you sign in/i })).toBeNull();
+  });
 });
