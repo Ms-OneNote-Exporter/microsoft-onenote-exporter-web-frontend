@@ -501,8 +501,6 @@ export function App() {
           // payload from the REST route, so there is one parser rather than two.
           void refreshStatus();
           break;
-          setView("consent");
-          break;
 
         default:
           // An event we do not model is not a reason to tear anything down.
@@ -545,7 +543,19 @@ export function App() {
   // snapshot. `view` is only ever forced to `create` by the user, or back to
   // `consent` by an erase.
   useEffect(() => {
-    if (!status) return;
+    if (!status) {
+      // The session is gone — erased, expired, or swept. The consent view is the
+      // only thing left, and the only way to start again.
+      setView("consent");
+      return;
+    }
+    if (status.sessionState === "erasing") {
+      // Being erased. Stay where you are: the erase's response is still in
+      // flight, and it expires the cookie. A session created now would have
+      // its cookie killed when that response lands, and the user would be left
+      // with a session that exists and cannot be used.
+      return;
+    }
     if (!status.hasSession) {
       setChallenge(null);
       setView("consent");
@@ -724,7 +734,6 @@ export function App() {
                 // one is stale — including the log block, which would otherwise
                 // greet the new session with the old one's output.
                 resetSessionState();
-                setView("credential");
                 void refreshStatus();
               }}
             />
