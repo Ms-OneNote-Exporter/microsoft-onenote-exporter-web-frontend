@@ -250,6 +250,21 @@ export interface SessionStatus {
   notebooks: NotebookList;
   export: RunningExport | null;
   csrfToken: string | null;
+  /**
+   * ISO timestamp when the session's absolute TTL expires, as sent by the backend.
+   * Null when absent or malformed.
+   */
+  expiresAt: string | null;
+  /**
+   * ISO timestamp when the session's idle TTL expires, as sent by the backend.
+   * Null when absent or malformed.
+   */
+  idleExpiresAt: string | null;
+  /**
+   * ISO timestamp of the server's time at snapshot capture, as sent by the backend.
+   * Null when absent or malformed.
+   */
+  serverTime: string | null;
 }
 
 /**
@@ -352,6 +367,9 @@ export function parseSessionStatus(raw: unknown): Snapshot {
         typeof raw.csrfToken === "string" && raw.csrfToken !== ""
           ? raw.csrfToken
           : null,
+      expiresAt: typeof session?.expiresAt === "string" ? session.expiresAt : null,
+      idleExpiresAt: typeof session?.idleExpiresAt === "string" ? session.idleExpiresAt : null,
+      serverTime: typeof raw.serverTime === "string" ? raw.serverTime : null,
     },
   };
 }

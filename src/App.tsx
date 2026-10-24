@@ -590,6 +590,78 @@ export function App() {
     setView("export");
   }, [status]);
 
+  // --- countdown to session removal ---
+  // The session's expiry is derived from the server's clock, not the device's,
+  // so the offset is recomputed from the latest snapshot on every tick rather
+  // than captured once. See issue: countdown drift under clock skew.
+  const [countdown, setCountdown] = useState<string | null>(null);
+  const statusRef = useRef(status);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  useEffect(() => {
+    const s = status;
+    if (!s?.expiresAt) {
+      setCountdown(null);
+      return;
+    }
+    let cancelled = false;
+    let id: ReturnType<typeof setInterval> | null = null;
+
+    const update = () => {
+      if (cancelled) return;
+      const cur = statusRef.current;
+      if (!cur?.expiresAt) {
+        setCountdown(null);
+        if (id !== null) { clearInterval(id); id = null; }
+        return;
+      }
+      // Recompute offset and deadline from the latest snapshot each tick.
+      let offset = 0;
+      if (cur.serverTime && cur.serverTime.indexOf("T") >= 0) {
+        const serverMs = new Date(cur.serverTime).getTime();
+        if (!isNaN(serverMs)) offset = serverMs - Date.now();
+      }
+      const deadlineStr = cur.idleExpiresAt || cur.expiresAt;
+      if (typeof deadlineStr !== "string" || deadlineStr.indexOf("T") < 0) {
+        setCountdown(null);
+        return;
+      }
+      const deadline = new Date(deadlineStr).getTime();
+      if (isNaN(deadline)) {
+        setCountdown(null);
+        return;
+      }
+      const remaining = deadline - (Date.now() + offset);
+      if (remaining <= 0) {
+        setCountdown("Session expired");
+        if (id !== null) { clearInterval(id); id = null; }
+        return;
+      }
+      const totalSeconds = Math.floor(remaining / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      if (hours > 0) {
+        setCountdown(`${hours}h ${minutes}m`);
+      } else if (minutes > 0) {
+        setCountdown(`${minutes}m ${seconds}s`);
+      } else {
+        setCountdown(`${seconds}s`);
+      }
+    };
+
+    update();
+    id = setInterval(update, 1000);
+    return () => {
+      cancelled = true;
+      if (id !== null) clearInterval(id);
+    };
+  }, [status?.expiresAt, status?.idleExpiresAt, status?.serverTime]);
+
+  // --- end countdown ---
+  
   const onErase = useCallback(async () => {
     try {
       await api.erase(csrfToken ?? "");
@@ -665,6 +737,11 @@ export function App() {
             <p className="version-info" data-testid="versions">
               Frontend {FRONTEND_VERSION} · backend {boot.build}
             </p>
+            {status?.expiresAt && countdown && (
+              <span className="countdown-badge" title="Time until this session is removed automatically">
+                {countdown}
+              </span>
+            )}
             <span className="status-badge">Backend protocol {EXPECTED_PROTOCOL} confirmed.</span>
           </header>
 
