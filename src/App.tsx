@@ -878,6 +878,10 @@ export function App() {
                   setActionError(describeFailure(err, "abort"));
                 });
               }}
+              onSignInAgain={() => {
+                setActionError(null);
+                setView("credential");
+              }}
             />
           )}
 

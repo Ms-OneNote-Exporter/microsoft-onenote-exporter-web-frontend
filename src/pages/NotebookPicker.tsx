@@ -93,6 +93,11 @@ export interface NotebookPickerProps {
   onList: () => void;
   onStart: (notebook: string) => void;
   onAbort: (exportId: string) => void;
+  /**
+   * Offered when the session is no longer signed in (e.g. the runner lost
+   * auth.json). Sets the view back to the credential form without erasing.
+   */
+  onSignInAgain?: () => void;
 }
 
 export function NotebookPicker({
@@ -109,6 +114,7 @@ export function NotebookPicker({
   onList,
   onStart,
   onAbort,
+  onSignInAgain,
 }: NotebookPickerProps) {
   const [selected, setSelected] = useState<string | null>(null);
   // A closed union transcribed from the api, so it is rendered directly rather
@@ -288,6 +294,11 @@ export function NotebookPicker({
           Exporting needs a signed-in session. Send your password on the
           previous step first.
         </p>
+      )}
+      {!signedIn && onSignInAgain && (
+        <button type="button" onClick={onSignInAgain}>
+          Sign in again
+        </button>
       )}
       </section>
     </>
