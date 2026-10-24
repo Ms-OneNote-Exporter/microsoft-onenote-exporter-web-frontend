@@ -1,6 +1,6 @@
 {
   "name": "microsoft-onenote-exporter-web-frontend",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Component A: the static React build. No session state, no secret, no credential, no authorisation logic. Talks HTTP to the backend on a different origin.",
   "license": "MIT",
@@ -31,5 +31,8 @@
     "typescript": "5.7.3",
     "vite": "6.4.4",
     "vitest": "5.0.3"
+  },
+  "overrides": {
+    "esbuild": "0.28.2"
   }
 }

@@ -67,6 +67,7 @@ export default defineConfig({
   plugins: [react(), assetAttestation(API_ORIGIN_VALIDATED)],
   server: { port: 5173 },
   build: {
+    target: "es2022",
     outDir: "dist",
     // Deterministic names keep `dist/ASSETS.sha256` byte-stable across runs,
     // so a CI diff means a real output change.
