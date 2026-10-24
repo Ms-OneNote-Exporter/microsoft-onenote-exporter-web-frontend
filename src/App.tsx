@@ -651,17 +651,14 @@ export function App() {
       return (
         <main className="shell">
           <header>
-            <h1>OneNote Exporter</h1>
-            {/* Both versions, and both from a different place than each other.
-                `boot.build` came from the handshake, which is the only component
-                that knows what the backend is running — it was fetched, held in
-                state and never rendered. A version-skew report that carried only
-                the protocol number carried nothing to compare against, so the
-                number to compare had to be fetched and thrown away. */}
-            <p className="fineprint" data-testid="versions">
+            <div className="logo-title">
+              <div className="logo" aria-hidden="true" />
+              <h1>OneNote Exporter</h1>
+            </div>
+            <p className="version-info" data-testid="versions">
               Frontend {FRONTEND_VERSION} · backend {boot.build}
             </p>
-            <p className="fineprint">Backend protocol {EXPECTED_PROTOCOL} confirmed.</p>
+            <span className="status-badge">Backend protocol {EXPECTED_PROTOCOL} confirmed.</span>
           </header>
 
           {statusError && (
