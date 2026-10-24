@@ -136,6 +136,7 @@ export function App() {
   // moment the request goes out and again when it resolves — that difference is
   // the whole staleness test, and it is documented in `reconcileNotebooks`.
   const notebooksSeq = useRef(0);
+  const exportSeq = useRef(0);
   const listingRef = useRef(false);
 
   /**
@@ -195,6 +196,7 @@ export function App() {
   const refreshStatus = useCallback(async () => {
     // Read *before* the await: this is what the request is about to be asked.
     const seqAtRequest = notebooksSeq.current;
+    const exportSeqAtRequest = exportSeq.current;
     // The same, for the session generation. A response that arrives after the
     // session changed is about a session this page is no longer showing.
     const epochAtRequest = sessionEpoch.current;
@@ -228,6 +230,12 @@ export function App() {
                 seqNow: notebooksSeq.current,
                 listingInFlight: listingRef.current,
               }),
+              export:
+                exportSeqAtRequest !== exportSeq.current && prev.export
+                  ? prev.export
+                  : prev.export?.downloadUrl && !parsed.value.export?.downloadUrl
+                    ? prev.export
+                    : parsed.value.export,
             }
           : parsed.value,
       );
@@ -403,9 +411,16 @@ export function App() {
 
         case "export-started":
         case "export-progress":
+          void refreshStatus();
+          break;
+
         case "export-done":
         case "export-partial":
         case "export-aborted":
+          // A terminal landed: bump the export revision so a refresh that was
+          // already in flight cannot overwrite the artifact the terminal just
+          // published with a snapshot taken before it. See issue #30.
+          exportSeq.current += 1;
           // Terminal events included, deliberately. The outcome lives in the
           // *event name* -- there is no `export-ended` -- and the payload
           // carries counts rather than a whole export. The snapshot is the
