@@ -591,40 +591,30 @@ export function App() {
   }, [status]);
 
   // --- countdown to session removal ---
-  // The session's expiry is derived from the server's clock, not the device's,
-  // so the offset is recomputed from the latest snapshot on every tick rather
-  // than captured once. See issue: countdown drift under clock skew.
+  // Only the 12-hour absolute session lifetime is shown; idle (15/30 min)
+  // removal timers are deliberately not surfaced to the user.
   const [countdown, setCountdown] = useState<string | null>(null);
-  const statusRef = useRef(status);
+  const deadlineRef = useRef<string | null>(null);
+  const serverTimeRef = useRef<string | null>(null);
+
+  // Keep the latest deadline/serverTime in refs without tearing down the
+  // ticking interval (issue #57). The interval reads from these refs.
   useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
+    deadlineRef.current = status?.expiresAt ?? null;
+    serverTimeRef.current = status?.serverTime ?? null;
+    if (!status?.expiresAt || !status?.hasSession) {
+      setCountdown(null);
+    }
+  }, [status?.expiresAt, status?.serverTime, status?.hasSession]);
 
   useEffect(() => {
-    const s = status;
-    if (!s?.expiresAt) {
-      setCountdown(null);
-      return;
-    }
     let cancelled = false;
     let id: ReturnType<typeof setInterval> | null = null;
 
     const update = () => {
       if (cancelled) return;
-      const cur = statusRef.current;
-      if (!cur?.expiresAt) {
-        setCountdown(null);
-        if (id !== null) { clearInterval(id); id = null; }
-        return;
-      }
-      // Recompute offset and deadline from the latest snapshot each tick.
-      let offset = 0;
-      if (cur.serverTime && cur.serverTime.indexOf("T") >= 0) {
-        const serverMs = new Date(cur.serverTime).getTime();
-        if (!isNaN(serverMs)) offset = serverMs - Date.now();
-      }
-      const deadlineStr = cur.idleExpiresAt || cur.expiresAt;
-      if (typeof deadlineStr !== "string" || deadlineStr.indexOf("T") < 0) {
+      const deadlineStr = deadlineRef.current;
+      if (!deadlineStr || deadlineStr.indexOf("T") < 0) {
         setCountdown(null);
         return;
       }
@@ -632,6 +622,13 @@ export function App() {
       if (isNaN(deadline)) {
         setCountdown(null);
         return;
+      }
+      // Recompute offset from the latest serverTime each tick (no drift).
+      let offset = 0;
+      const st = serverTimeRef.current;
+      if (st && st.indexOf("T") >= 0) {
+        const serverMs = new Date(st).getTime();
+        if (!isNaN(serverMs)) offset = serverMs - Date.now();
       }
       const remaining = deadline - (Date.now() + offset);
       if (remaining <= 0) {
@@ -658,7 +655,7 @@ export function App() {
       cancelled = true;
       if (id !== null) clearInterval(id);
     };
-  }, [status?.expiresAt, status?.idleExpiresAt, status?.serverTime]);
+  }, []);
 
   // --- end countdown ---
   
@@ -737,12 +734,14 @@ export function App() {
             <p className="version-info" data-testid="versions">
               Frontend {FRONTEND_VERSION} · backend {boot.build}
             </p>
-            {status?.expiresAt && countdown && (
-              <span className="countdown-badge" title="Time until this session is removed automatically">
-                {countdown}
-              </span>
-            )}
-            <span className="status-badge">Backend protocol {EXPECTED_PROTOCOL} confirmed.</span>
+            <div className="header-badges">
+              <span className="status-badge">Backend protocol {EXPECTED_PROTOCOL} confirmed.</span>
+              {status?.hasSession && status?.expiresAt && countdown && (
+                <span className="countdown-badge" title="Time until this session is removed automatically">
+                  {countdown}
+                </span>
+              )}
+            </div>
           </header>
 
           {statusError && (

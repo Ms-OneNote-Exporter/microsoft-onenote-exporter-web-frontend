@@ -132,9 +132,15 @@ body {
   font-weight: 500;
 }
 
+.header-badges {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .countdown-badge {
   display: inline-block;
-  margin-left: 8px;
   padding: 6px 12px;
   border-radius: 6px;
   font-size: 12px;
