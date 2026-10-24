@@ -102,33 +102,12 @@ body {
 .logo {
   width: 40px;
   height: 40px;
-  background: var(--accent);
-  border-radius: 6px;
-  position: relative;
   flex-shrink: 0;
+  object-fit: contain;
 }
 
-.logo::before,
-.logo::after {
-  content: "";
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  width: 2px;
-  background: #ffffff;
-}
 
-.logo::before {
-  left: 8px;
-  box-shadow: 0 4px 0 #ffffff, 0 8px 0 #ffffff, 0 12px 0 #ffffff,
-    0 16px 0 #ffffff;
-}
 
-.logo::after {
-  right: 8px;
-  box-shadow: 0 4px 0 #ffffff, 0 8px 0 #ffffff, 0 12px 0 #ffffff,
-    0 16px 0 #ffffff;
-}
 
 .shell header h1 {
   font-size: 28px;

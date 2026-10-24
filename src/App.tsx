@@ -652,7 +652,14 @@ export function App() {
         <main className="shell">
           <header>
             <div className="logo-title">
-              <div className="logo" aria-hidden="true" />
+              <img
+                src="/logo.svg"
+                className="logo"
+                alt=""
+                role="presentation"
+                width="40"
+                height="40"
+              />
               <h1>OneNote Exporter</h1>
             </div>
             <p className="version-info" data-testid="versions">
