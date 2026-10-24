@@ -278,7 +278,12 @@ export function NotebookPicker({
         Export {selected ? `“${selected}”` : ""}
       </button>
 
-      {!signedIn && !signingIn && (
+      {!signedIn && !signingIn && authState !== "none" && (
+        <p className="fineprint" role="status">
+          Microsoft refused the sign-in. Start a new session and try again.
+        </p>
+      )}
+      {!signedIn && !signingIn && authState === "none" && (
         <p className="fineprint">
           Exporting needs a signed-in session. Send your password on the
           previous step first.

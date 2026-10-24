@@ -235,6 +235,15 @@ describe("while a sign-in is in progress", () => {
     expect(screen.getByText(/send your password on the previous step/i)).toBeDefined();
   });
 
+  it("when a sign-in has failed, the stale 'send your password' copy is replaced", () => {
+    // authState: "expired", signedIn: false — Microsoft refused the sign-in. The
+    // old instruction to send a password is not actionable from here.
+    renderPicker({ authState: "expired", signedIn: false, challengeActive: false });
+
+    expect(screen.getByText(/microsoft refused the sign-in/i)).toBeDefined();
+    expect(screen.queryByText(/send your password on the previous step/i)).toBeNull();
+  });
+
   it("when a challenge is active, the generic notice is suppressed", () => {
     // An MFA challenge is outstanding — App.tsx shows the actionable phone-approval
     // notice itself, so the generic "hold this tab open" notice must be suppressed.
