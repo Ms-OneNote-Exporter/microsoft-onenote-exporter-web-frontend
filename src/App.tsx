@@ -561,6 +561,13 @@ export function App() {
       setView("consent");
       return;
     }
+    if (status.authState === "authenticating") {
+      // A reload mid-sign-in must land on the export view, where the signing-in
+      // notice renders, rather than on the credential form — which is what a
+      // fresh mount's "consent" default would otherwise produce. See #44.
+      setView("export");
+      return;
+    }
     if (!status.signedIn) {
       setView((v) => (v === "consent" ? "credential" : v));
       return;
