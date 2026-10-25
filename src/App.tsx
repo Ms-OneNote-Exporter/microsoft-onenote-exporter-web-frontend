@@ -648,7 +648,7 @@ export function App() {
       const minutes = Math.floor((totalSeconds % 3600) / 60);
       const seconds = totalSeconds % 60;
       if (hours > 0) {
-        setCountdown(`${hours}h ${minutes}m`);
+        setCountdown(`${hours}h ${minutes}m ${seconds}s`);
       } else if (minutes > 0) {
         setCountdown(`${minutes}m ${seconds}s`);
       } else {
