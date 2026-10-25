@@ -596,12 +596,24 @@ export function App() {
   const [countdown, setCountdown] = useState<string | null>(null);
   const deadlineRef = useRef<string | null>(null);
   const serverTimeRef = useRef<string | null>(null);
+  const offsetRef = useRef<number>(0);
 
   // Keep the latest deadline/serverTime in refs without tearing down the
   // ticking interval (issue #57). The interval reads from these refs.
   useEffect(() => {
     deadlineRef.current = status?.expiresAt ?? null;
     serverTimeRef.current = status?.serverTime ?? null;
+    // Compute the client/server clock offset ONCE when serverTime changes,
+    // so the per-tick update() can subtract a stable offset instead of
+    // re-deriving it every second (which would cancel Date.now() and freeze
+    // the countdown). See the bug: remaining = deadline - (now + offset)
+    // where offset = serverMs - nowAtSampleTime.
+    if (status?.serverTime && status.serverTime.indexOf("T") >= 0) {
+      const serverMs = new Date(status.serverTime).getTime();
+      if (!isNaN(serverMs)) offsetRef.current = serverMs - Date.now();
+    } else {
+      offsetRef.current = 0;
+    }
     if (!status?.expiresAt || !status?.hasSession) {
       setCountdown(null);
     }
@@ -623,14 +635,9 @@ export function App() {
         setCountdown(null);
         return;
       }
-      // Recompute offset from the latest serverTime each tick (no drift).
-      let offset = 0;
-      const st = serverTimeRef.current;
-      if (st && st.indexOf("T") >= 0) {
-        const serverMs = new Date(st).getTime();
-        if (!isNaN(serverMs)) offset = serverMs - Date.now();
-      }
-      const remaining = deadline - (Date.now() + offset);
+      // Use the offset captured when serverTime last changed, so the
+      // countdown actually decreases each second.
+      const remaining = deadline - (Date.now() + offsetRef.current);
       if (remaining <= 0) {
         setCountdown("Session expired");
         if (id !== null) { clearInterval(id); id = null; }
